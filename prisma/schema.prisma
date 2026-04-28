@@ -1,0 +1,29 @@
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+generator client {
+  provider  = "prisma-client-py"
+  interface = "asyncio"
+}
+
+enum Role {
+  MEMBER
+  ADMIN
+  SUPER_ADMIN
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  picture      String?
+  googleSub    String   @unique @map("google_sub")
+  role         Role   @default(MEMBER)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("users")
+}
