@@ -9,21 +9,71 @@ generator client {
   interface = "asyncio"
 }
 
+// ============================================================
+// ENUMS
+// ============================================================
+
 enum Role {
   MEMBER
   ADMIN
   SUPER_ADMIN
 }
 
+enum WorkspaceRole {
+  MEMBER
+  ADMIN
+  SUPER_ADMIN
+}
+
+// ============================================================
+// MODELS
+// ============================================================
+
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  name         String?
-  picture      String?
-  googleSub    String   @unique @map("google_sub")
-  role         Role   @default(MEMBER)
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  picture   String?
+  googleSub String   @unique @map("google_sub")
+  role      Role     @default(MEMBER)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations — not DB columns, Prisma navigation only
+  ownedWorkspaces      Workspace[]       @relation("WorkspaceOwner")
+  workspaceMemberships WorkspaceMember[]
 
   @@map("users")
+}
+
+model Workspace {
+  id                  String   @id @default(cuid())
+  name                String
+  description         String?
+  allowedEmailDomains String[] @map("allowed_email_domains")
+  ownerId             String   @map("owner_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  // Relations — not DB columns, Prisma navigation only
+  owner   User              @relation("WorkspaceOwner", fields: [ownerId], references: [id])
+  members WorkspaceMember[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  userId      String        @map("user_id")
+  workspaceId String        @map("workspace_id")
+  role        WorkspaceRole @default(MEMBER)
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  // Relations — not DB columns, Prisma navigation only
+  user      User      @relation(fields: [userId], references: [id])
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+
+  @@unique([userId, workspaceId])
+  @@map("workspace_members")
 }
