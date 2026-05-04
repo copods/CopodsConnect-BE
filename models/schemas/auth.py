@@ -21,7 +21,7 @@ class UserOut(BaseModel):
     email: EmailStr
     name: Optional[str] = None
     picture: Optional[str] = None
-    role: Role
+    role: str #plain str, not Role enum - avoids serialization issues 
 
 
 class AuthResponse(BaseModel):

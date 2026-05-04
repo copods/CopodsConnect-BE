@@ -8,7 +8,7 @@ from db.client import db
 from prisma.enums import Role
 from utils.exceptions import AppException
 from constants import JWT_ALGORITHM
-
+from models.schemas.auth import AuthResponse, UserOut
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -93,27 +93,28 @@ async def _get_or_create_user(user_info: dict):
     name = user_info.get("name")
     picture = user_info.get("picture")
 
-    if not email or not google_sub:
-        raise AppException(400, "Google account missing required information")
+    if not email:
+        raise AppException(400, "Email is required")
 
-    existing_user = await db.user.find_unique(where={"googleSub": google_sub})
+    existing_user = await db.user.find_unique(where={"email": email})
 
     if existing_user:
         user = await db.user.update(
-            where={"googleSub": google_sub},
+            where={"email": email},
             data={"name": name, "picture": picture}
         )
     else:
-        user = await db.user.create(
-            data={
-                "email": email,
-                "googleSub": google_sub,
-                "name": name,
-                "picture": picture,
-                "role": Role.MEMBER
-            }
-        )
+        user_data={
+            "email":email,
+            "name":name,
+            "picture":picture,
+            "role":Role.MEMBER
+        }
+        if google_sub:
+            user_data["google_sub"] = google_sub
 
+        user = await db.user.create(data=user_data)
+        
     return user
 
 
@@ -140,32 +141,37 @@ async def handle_google_callback(code: str) -> dict:
     print("GOOGLE_CLIENT_SECRET:", "SET" if GOOGLE_CLIENT_SECRET else "NOT SET")
     print("GOOGLE_REDIRECT_URI:", GOOGLE_REDIRECT_URI)
     
+    #Code is exchanged for access token
     tokens = await _exchange_code_for_tokens(code)
     print("TOKENS RECEIVED:", tokens)
     
+    #access token is extracted from tokens
     access_token = tokens.get("access_token")
     print("ACCESS TOKEN:", "SET" if access_token else "NOT SET")
 
+    #Check if access token is present
     if not access_token:
         raise AppException(400, "No access token received from Google")
 
+    #User info is fetched using access token
     user_info = await _get_google_user_info(access_token)
     print("USER INFO:", user_info)
     
+    #User is created or fetched from database
     user = await _get_or_create_user(user_info)
     print("USER OBJECT:", user)
     print("ROLE:", user.role)
 
-    # THIS WAS MISSING — create JWT and return response
+    #Token is created using user object
     token = _create_jwt(user)
 
-    return {
-        "token": token,
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "name": user.name,
-            "picture": user.picture,
-            "role": str(user.role)
-        }
-    }
+    return AuthResponse(
+        token=token,
+        user=UserOut(
+            id=user.id,
+            email=user.email,
+            name=user.name,
+            picture=user.picture,
+            role=str(user.role)
+        )
+    ).model_dump()
