@@ -6,6 +6,7 @@ from jose import jwt, JWTError
 from db.client import db
 from utils.exceptions import AppException
 from constants import JWT_ALGORITHM
+from prisma.enums import Role
 
 security = HTTPBearer()
 
@@ -41,3 +42,8 @@ async def get_current_user(
         raise AppException(401, "User no longer exists")
 
     return user
+
+async def require_platform_admin(current_user = Depends(get_current_user)):
+    if current_user.role not in (Role.ADMIN, Role.SUPER_ADMIN):
+        raise AppException(403, "Forbidden: Admin access required")
+    return current_user

@@ -101,7 +101,7 @@ async def _get_or_create_user(user_info: dict):
     if existing_user:
         user = await db.user.update(
             where={"email": email},
-            data={"name": name, "picture": picture}
+            data={"name": name, "picture": picture , "googleSub": google_sub}
         )
     else:
         user_data={
@@ -111,7 +111,7 @@ async def _get_or_create_user(user_info: dict):
             "role":Role.MEMBER
         }
         if google_sub:
-            user_data["google_sub"] = google_sub
+            user_data["googleSub"] = google_sub
 
         user = await db.user.create(data=user_data)
         
