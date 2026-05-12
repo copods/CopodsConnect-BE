@@ -30,14 +30,18 @@ enum WorkspaceRole {
 // ============================================================
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  picture   String?
-  googleSub String?   @unique @map("google_sub")
-  role      Role     @default(MEMBER)
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id               String    @id @default(cuid())
+  email            String    @unique
+  name             String?
+  picture          String?
+  googleSub        String?   @unique @map("google_sub")
+  role             Role      @default(MEMBER)
+  isBanned         Boolean   @default(false) @map("is_banned")
+  bannedUntil      DateTime? @map("banned_until")
+  hasLoggedInApp   Boolean   @default(false) @map("has_logged_in_app")
+  hasLoggedInPanel Boolean   @default(false) @map("has_logged_in_panel")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   // Relations — not DB columns, Prisma navigation only
   ownedWorkspaces      Workspace[]       @relation("WorkspaceOwner")

@@ -8,6 +8,7 @@ class GoogleCallbackRequest(BaseModel):
     """IN — receives code from frontend after Google redirects to frontend."""
     code: str
     state: Optional[str] = None
+    platform: str  # "app" or "panel"
 
 
 class GoogleInitResponse(BaseModel):
@@ -21,7 +22,7 @@ class UserOut(BaseModel):
     email: EmailStr
     name: Optional[str] = None
     picture: Optional[str] = None
-    role: str #plain str, not Role enum - avoids serialization issues 
+    role: str  # plain str, not Role enum - avoids serialization issues
 
 
 class AuthResponse(BaseModel):
