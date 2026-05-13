@@ -7,6 +7,7 @@ from jose import jwt as jose_jwt
 from db.client import db
 from prisma.enums import Role
 from utils.exceptions import AppException
+from utils.ban_check import raise_if_user_ban_active
 from constants import JWT_ALGORITHM, ALLOWED_EMAIL_DOMAIN
 from models.schemas.auth import AuthResponse, UserOut
 
@@ -117,6 +118,15 @@ async def _get_or_create_user(user_info: dict, platform: str):
     existing_user = await db.user.find_unique(where={"email": email})
 
     if existing_user:
+        # Block login while ban is active (permanent or temporary, not yet elapsed).
+        # Expired temporary ban: clear in DB before issuing a token or updating profile.
+        if existing_user.isBanned:
+            raise_if_user_ban_active(existing_user)
+            await db.user.update(
+                where={"id": existing_user.id},
+                data={"isBanned": False, "bannedUntil": None},
+            )
+
         # Panel login — only ADMIN and SUPER_ADMIN should be able to access panel
         if platform == "panel" and existing_user.role == Role.MEMBER:
             raise AppException(403, "You do not have access to the admin panel")

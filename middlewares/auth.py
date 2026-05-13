@@ -1,12 +1,12 @@
 # middlewares/auth.py
 import os
 import asyncio
-from datetime import datetime, timezone
 from fastapi import Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from db.client import db
 from utils.exceptions import AppException
+from utils.ban_check import raise_if_user_ban_active
 from constants import JWT_ALGORITHM
 from prisma.enums import Role
 
@@ -71,27 +71,11 @@ async def get_current_user(
     if not user:
         raise AppException(401, "User no longer exists")
 
-    # Ban check — covers both temporary and permanent bans
+    # Ban check — same rules as OAuth login (utils.ban_check.raise_if_user_ban_active)
     if user.isBanned:
-        if user.bannedUntil is None:
-            # Permanent ban
-            raise AppException(403, "Your account has been permanently suspended. Please contact your administrator.")
-
-        now = datetime.now(timezone.utc)
-        banned_until = (
-            user.bannedUntil.replace(tzinfo=timezone.utc)
-            if user.bannedUntil.tzinfo is None
-            else user.bannedUntil
-        )
-
-        if now < banned_until:
-            raise AppException(
-                403,
-                f"Your account has been suspended until {banned_until.isoformat()}. Please contact your administrator."
-            )
-        else:
-            # Ban expired — let through, clean up silently in background
-            asyncio.create_task(_clear_expired_ban(user.id))
+        raise_if_user_ban_active(user)
+        # Expired temporary ban — let through, clean up silently in background
+        asyncio.create_task(_clear_expired_ban(user.id))
 
     return user
 
