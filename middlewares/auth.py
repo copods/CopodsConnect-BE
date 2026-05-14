@@ -27,7 +27,8 @@ async def _clear_expired_ban(user_id: str):
             where={"id": user_id},
             data={
                 "isBanned": False,
-                "bannedUntil": None
+                "bannedUntil": None,
+                "banReason": None,
             }
         )
     except Exception:
@@ -70,6 +71,9 @@ async def get_current_user(
     user = await db.user.find_unique(where={"id": user_id})
     if not user:
         raise AppException(401, "User no longer exists")
+
+    if user.deletedAt is not None:
+        raise AppException(401, "This account has been deleted")
 
     # Ban check — same rules as OAuth login (utils.ban_check.raise_if_user_ban_active)
     if user.isBanned:

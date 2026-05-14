@@ -34,14 +34,19 @@ model User {
   email            String    @unique
   name             String?
   picture          String?
+  designation      String?   @map("designation")
+  dateOfJoining    DateTime? @map("date_of_joining")
+  birthdate        DateTime? @map("birthdate")
   googleSub        String?   @unique @map("google_sub")
   role             Role      @default(MEMBER)
   isBanned         Boolean   @default(false) @map("is_banned")
   bannedUntil      DateTime? @map("banned_until")
+  banReason        String?   @map("ban_reason")
   hasLoggedInApp   Boolean   @default(false) @map("has_logged_in_app")
   hasLoggedInPanel Boolean   @default(false) @map("has_logged_in_panel")
   createdAt        DateTime  @default(now()) @map("created_at")
   updatedAt        DateTime  @updatedAt @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
 
   // Relations — not DB columns, Prisma navigation only
   ownedWorkspaces      Workspace[]       @relation("WorkspaceOwner")

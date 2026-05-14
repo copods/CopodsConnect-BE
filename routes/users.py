@@ -1,5 +1,6 @@
 # routes/users.py
 from fastapi import APIRouter, Depends, UploadFile, File, Query
+from fastapi.responses import Response
 from middlewares.auth import require_admin, require_super_admin
 from services import user_service
 from utils.ApiResponse import api_response
@@ -11,7 +12,8 @@ from models.schemas.users import (
     DeleteUserRequest,
     BanUserRequest,
     EditBanRequest,
-    ChangeRoleRequest
+    ChangeRoleRequest,
+    EditUserRequest,
 )
 
 users_router = APIRouter(prefix="/users", tags=["Users"])
@@ -39,8 +41,20 @@ async def invite_users(
     body: InviteUsersRequest,
     current_user=Depends(require_admin)
 ):
-    result = await user_service.invite_users(body.emails)
+    result = await user_service.invite_users(body.people)
     return api_response(200, result, "Users invited successfully")
+
+
+@users_router.get("/invite/bulk/template")
+async def download_bulk_invite_template(current_user=Depends(require_admin)):
+    content = user_service.build_bulk_invite_template_workbook_bytes()
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="bulk-invite-template.xlsx"',
+        },
+    )
 
 
 @users_router.post("/invite/bulk")
@@ -71,7 +85,7 @@ async def invite_admins(
     body: InviteAdminsRequest,
     current_user=Depends(require_super_admin)
 ):
-    result = await user_service.invite_admins(body.emails)
+    result = await user_service.invite_admins(body.people)
     return api_response(200, result, "Admins invited successfully")
 
 
@@ -94,9 +108,38 @@ async def resend_admin_invite(
     return api_response(200, result, "Admin invitations resent successfully")
 
 
+@users_router.get("/admins/invite/bulk/template")
+async def download_bulk_invite_admin_template(current_user=Depends(require_super_admin)):
+    content = user_service.build_bulk_invite_template_workbook_bytes()
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="bulk-invite-admins-template.xlsx"',
+        },
+    )
+
+
 # ============================================================
 # DELETE
 # ============================================================
+
+@users_router.get("/deleted")
+async def get_deleted_users(
+    current_user=Depends(require_admin)
+):
+    result = await user_service.get_deleted_users()
+    return api_response(200, result, "Deleted users fetched successfully")
+
+
+@users_router.post("/{user_id}/restore")
+async def restore_user(
+    user_id: str,
+    current_user=Depends(require_admin)
+):
+    result = await user_service.restore_user(current_user, user_id)
+    return api_response(200, result, "User restored successfully")
+
 
 @users_router.delete("/{user_id}")
 async def delete_user(
@@ -126,7 +169,7 @@ async def ban_user(
     body: BanUserRequest,
     current_user=Depends(require_admin)
 ):
-    result = await user_service.ban_user(current_user, user_id, body.durationHours)
+    result = await user_service.ban_user(current_user, user_id, body.durationHours, body.reason)
     return api_response(200, result, "User banned successfully")
 
 
@@ -136,7 +179,9 @@ async def edit_ban(
     body: EditBanRequest,
     current_user=Depends(require_admin)
 ):
-    result = await user_service.edit_ban(current_user, user_id, body.durationHours)
+    payload = body.model_dump(exclude_unset=True)
+    ban_updates = {"reason": payload["reason"]} if "reason" in payload else None
+    result = await user_service.edit_ban(current_user, user_id, body.durationHours, ban_updates)
     return api_response(200, result, "Ban updated successfully")
 
 
@@ -161,3 +206,20 @@ async def change_role(
 ):
     result = await user_service.change_role(current_user, user_id, body.role)
     return api_response(200, result, "User role updated successfully")
+
+
+# ============================================================
+# EDIT USER
+# ============================================================
+
+# NOTE: This route must always be declared AFTER /{user_id}/role and /{user_id}/ban to avoid path conflicts
+
+@users_router.patch("/{user_id}")
+async def edit_user(
+    user_id: str,
+    body: EditUserRequest,
+    current_user=Depends(require_admin)
+):
+    updates = body.model_dump(exclude_unset=True)
+    result = await user_service.edit_user(current_user, user_id, updates)
+    return api_response(200, result, "User updated successfully")

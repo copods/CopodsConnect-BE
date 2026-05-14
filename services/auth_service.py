@@ -10,6 +10,7 @@ from utils.exceptions import AppException
 from utils.ban_check import raise_if_user_ban_active
 from constants import JWT_ALGORITHM, ALLOWED_EMAIL_DOMAIN
 from models.schemas.auth import AuthResponse, UserOut
+from services.user_service import derive_app_status, derive_panel_status, derive_status
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -118,13 +119,15 @@ async def _get_or_create_user(user_info: dict, platform: str):
     existing_user = await db.user.find_unique(where={"email": email})
 
     if existing_user:
+        if existing_user.deletedAt is not None:
+            raise AppException(403, "This account has been deleted. Please contact your administrator.")
         # Block login while ban is active (permanent or temporary, not yet elapsed).
         # Expired temporary ban: clear in DB before issuing a token or updating profile.
         if existing_user.isBanned:
             raise_if_user_ban_active(existing_user)
             await db.user.update(
                 where={"id": existing_user.id},
-                data={"isBanned": False, "bannedUntil": None},
+                data={"isBanned": False, "bannedUntil": None, "banReason": None},
             )
 
         # Panel login — only ADMIN and SUPER_ADMIN should be able to access panel
@@ -193,6 +196,9 @@ async def handle_google_callback(code: str, platform: str) -> dict:
             email=user.email,
             name=user.name,
             picture=user.picture,
-            role=str(user.role)
+            role=str(user.role),
+            status=derive_status(user),
+            appStatus=derive_app_status(user),
+            panelStatus=derive_panel_status(user),
         )
     ).model_dump()
