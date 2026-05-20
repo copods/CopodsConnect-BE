@@ -159,9 +159,6 @@ def require_platform(expected_platform: str):
         if platform != expected_platform:
             raise AppException(403, f"This token is not valid for the {expected_platform}.")
 
-        # Re-use get_current_user logic by calling it directly
-        from fastapi.security import HTTPAuthorizationCredentials as HAC
-        from fastapi import Request
         return await get_current_user(credentials)
 
     return _check

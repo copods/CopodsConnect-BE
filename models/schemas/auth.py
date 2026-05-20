@@ -23,7 +23,6 @@ class UserOut(BaseModel):
     name: Optional[str] = None
     picture: Optional[str] = None
     role: str  # plain str, not Role enum - avoids serialization issues
-    status: str
     appStatus: str
     panelStatus: str
 

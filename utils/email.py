@@ -1,12 +1,22 @@
 # utils/email.py
+import asyncio
 import smtplib
 import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+# NOTE: Emails are fire-and-forget via thread pool. If the server restarts
+# mid-send, background emails in flight will be lost silently.
+# Use resend_invite to retry. A persistent queue (e.g. ARQ + Redis) should
+# replace this when reliability becomes a requirement.
 
-def send_invitation_email(to_email: str) -> bool:
+
+async def send_invitation_email(to_email: str) -> bool:
     """Sends app invitation email to a new user (MEMBER)."""
+    return await asyncio.to_thread(_send_invitation_email_sync, to_email)
+
+
+def _send_invitation_email_sync(to_email: str) -> bool:
     try:
         gmail_user = os.getenv("GMAIL_USER")
         gmail_password = os.getenv("GMAIL_APP_PASSWORD")
@@ -39,8 +49,12 @@ The CopodsConnect Team
         return False
 
 
-def send_admin_invitation_email(to_email: str) -> bool:
+async def send_admin_invitation_email(to_email: str) -> bool:
     """Sends admin panel invitation email to a new admin (ADMIN role)."""
+    return await asyncio.to_thread(_send_admin_invitation_email_sync, to_email)
+
+
+def _send_admin_invitation_email_sync(to_email: str) -> bool:
     try:
         gmail_user = os.getenv("GMAIL_USER")
         gmail_password = os.getenv("GMAIL_APP_PASSWORD")
@@ -75,8 +89,12 @@ The CopodsConnect Team
         return False
 
 
-def send_promotion_email(to_email: str) -> bool:
+async def send_promotion_email(to_email: str) -> bool:
     """Sends email when a user is promoted to Admin."""
+    return await asyncio.to_thread(_send_promotion_email_sync, to_email)
+
+
+def _send_promotion_email_sync(to_email: str) -> bool:
     try:
         gmail_user = os.getenv("GMAIL_USER")
         gmail_password = os.getenv("GMAIL_APP_PASSWORD")
@@ -113,8 +131,12 @@ The CopodsConnect Team
         return False
 
 
-def send_demotion_email(to_email: str) -> bool:
+async def send_demotion_email(to_email: str) -> bool:
     """Sends email when a user's admin access is removed (Member)."""
+    return await asyncio.to_thread(_send_demotion_email_sync, to_email)
+
+
+def _send_demotion_email_sync(to_email: str) -> bool:
     try:
         gmail_user = os.getenv("GMAIL_USER")
         gmail_password = os.getenv("GMAIL_APP_PASSWORD")

@@ -52,6 +52,14 @@ model User {
   ownedWorkspaces      Workspace[]       @relation("WorkspaceOwner")
   workspaceMemberships WorkspaceMember[]
 
+  @@index([deletedAt])
+  @@index([isBanned])
+  @@index([hasLoggedInApp])
+  @@index([hasLoggedInPanel])
+  @@index([role, deletedAt])
+  @@index([isBanned, deletedAt])
+  @@index([hasLoggedInApp, isBanned, deletedAt])
+  @@index([hasLoggedInPanel, isBanned, deletedAt])
   @@map("users")
 }
 

@@ -22,7 +22,8 @@ async def clear_expired_bans() -> None:
             },
             data={
                 "isBanned": False,
-                "bannedUntil": None
+                "bannedUntil": None,
+                "banReason": None,
             }
         )
     except Exception:

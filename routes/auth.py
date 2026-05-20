@@ -2,17 +2,17 @@
 from fastapi import APIRouter, Depends
 from services import auth_service
 from utils.ApiResponse import api_response
-from models.schemas.auth import GoogleCallbackRequest, AuthResponse, GoogleInitResponse
+from models.schemas.auth import GoogleCallbackRequest
 from middlewares.auth import get_current_user
 
-auth_router = APIRouter(prefix="/auth", tags=["auth"])
+auth_router = APIRouter(prefix="/auth", tags=["Auth"])
 
-@auth_router.get("/google", response_model=GoogleInitResponse)
+@auth_router.get("/google")
 async def google_login():
     auth_url = auth_service.get_google_auth_url()
     return api_response(200, auth_url, "Google Auth URL generated")
 
-@auth_router.post("/google/callback", response_model=AuthResponse)
+@auth_router.post("/google/callback")
 async def google_callback(body: GoogleCallbackRequest):
     result = await auth_service.handle_google_callback(body.code, body.platform)
     return api_response(200, result, "Logged In Successfully")
@@ -20,9 +20,8 @@ async def google_callback(body: GoogleCallbackRequest):
 @auth_router.post("/logout")
 async def logout():
     """
-    Client side logout — frontend must delete the JWT from storage.
-    Route exists for consistency and future refresh token support.
-    Requires valid JWT in Authorization header to confirm user is logged in.
+    No authentication required. Logout is a client-side operation — the client
+    discards the token. No server-side token invalidation is performed.
     """
     return api_response(200, "Logged out successfully")
 
@@ -34,4 +33,5 @@ async def me(
     Returns the current user's information.
     Requires valid JWT in Authorization header.
     """
-    return api_response(200, current_user, "Current user information")
+    from services.user_service import serialize_user
+    return api_response(200, serialize_user(current_user), "Current user information")

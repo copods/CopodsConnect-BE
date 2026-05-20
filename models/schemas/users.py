@@ -23,35 +23,18 @@ class InviteAdminsRequest(BaseModel):
     """IN — invite one or more admins with optional profile data. SUPER_ADMIN only."""
     people: List[InvitePersonRequest]
 
-class BulkInviteRequest(BaseModel):
-    pass  # no body fields — input is a file, handled by FastAPI UploadFile directly in route
-
 class ResendInviteRequest(BaseModel):
     """IN — resend invite emails to existing users/admins. No new DB entry created."""
     emails: List[EmailStr]
 
-# ============================================================
-# USER OUT SHAPES
-# ============================================================
 
-class UserListItem(BaseModel):
-    """OUT — single user row returned in list views."""
-    id: str
-    email: str
-    name: Optional[str] = None
-    picture: Optional[str] = None
-    designation: Optional[str] = None
-    dateOfJoining: Optional[datetime] = None
-    birthdate: Optional[datetime] = None
-    role: str
-    status: str
-    appStatus: str
-    panelStatus: str
-    isBanned: bool
-    bannedUntil: Optional[datetime] = None
-    hasLoggedInApp: bool
-    hasLoggedInPanel: bool
-    createdAt: datetime
+class PaginatedUsersResponse(BaseModel):
+    """OUT — paginated user list (internal documentation; wrapped by api_response envelope)."""
+    users: list
+    total: int
+    page: int
+    pageSize: int
+    totalPages: int
 
 # ============================================================
 # DELETE
@@ -66,7 +49,7 @@ class DeleteUserRequest(BaseModel):
 # ============================================================
 
 class BanUserRequest(BaseModel):
-    """IN — ban a user/admin for a given number of hours from now."""
+    """IN — time-bound ban: duration in hours from now (must be > 0)."""
     durationHours: int = Field(..., ge=1)
     reason: str = Field(..., min_length=1, max_length=2000)
 
