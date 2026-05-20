@@ -3,7 +3,7 @@ from services import auth_service
 from utils.ApiResponse import  api_response
 from utils.exceptions import AppException
 from models.schemas.auth import GoogleCallbackRequest, AuthResponse, GoogleInitResponse
-from utils.security import get_current_user
+from middlewares.auth import get_current_user
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 #axios.get("http://localhost:8000/api/v1/auth/google")
