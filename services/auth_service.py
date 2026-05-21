@@ -9,7 +9,7 @@ from prisma.enums import Role
 from utils.exceptions import AppException
 from utils.ban_check import raise_if_user_ban_active
 from constants import JWT_ALGORITHM, ALLOWED_EMAIL_DOMAIN
-from models.schemas.auth import AuthResponse, UserOut
+from models.schemas.auth import AuthResponse, UserOut , GoogleInitResponse
 from services.user_service import derive_app_status, derive_panel_status
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
@@ -23,7 +23,7 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
-def get_google_auth_url() -> str:
+def get_google_auth_url() -> dict:
     """
     Builds the Google OAuth authorization URL.
     Frontend redirects user to this URL to begin login.
@@ -37,14 +37,15 @@ def get_google_auth_url() -> str:
         "access_type": "offline",
         "prompt": "select_account",
     }
-    return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
+    return GoogleInitResponse(auth_url=f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}").model_dump()
 
 
-async def _exchange_code_for_tokens(code: str) -> dict:
+async def _exchange_code_for_tokens(code: str, redirect_uri:str | None=None) -> dict:
     """
     Exchanges the one-time code from Google for access + id tokens.
     Private function — only called by handle_google_callback.
     """
+    uri = redirect_uri or GOOGLE_REDIRECT_URI
     async with httpx.AsyncClient() as client:
         token_response = await client.post(
             GOOGLE_TOKEN_URL,
@@ -52,7 +53,7 @@ async def _exchange_code_for_tokens(code: str) -> dict:
                 "code": code,
                 "client_id": GOOGLE_CLIENT_ID,
                 "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "redirect_uri": uri,
                 "grant_type": "authorization_code",
             }
         )
