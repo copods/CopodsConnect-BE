@@ -19,61 +19,36 @@ enum Role {
   SUPER_ADMIN
 }
 
-enum WorkspaceRole {
-  MEMBER
-  ADMIN
-  SUPER_ADMIN
-}
-
 // ============================================================
 // MODELS
 // ============================================================
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  picture   String?
-  googleSub String   @unique @map("google_sub")
-  role      Role     @default(MEMBER)
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id               String    @id @default(cuid())
+  email            String    @unique
+  name             String?
+  picture          String?
+  designation      String?   @map("designation")
+  dateOfJoining    DateTime? @map("date_of_joining")
+  birthdate        DateTime? @map("birthdate")
+  googleSub        String?   @unique @map("google_sub")
+  role             Role      @default(MEMBER)
+  isBanned         Boolean   @default(false) @map("is_banned")
+  bannedUntil      DateTime? @map("banned_until")
+  banReason        String?   @map("ban_reason")
+  hasLoggedInApp   Boolean   @default(false) @map("has_logged_in_app")
+  hasLoggedInPanel Boolean   @default(false) @map("has_logged_in_panel")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
 
-  // Relations — not DB columns, Prisma navigation only
-  ownedWorkspaces      Workspace[]       @relation("WorkspaceOwner")
-  workspaceMemberships WorkspaceMember[]
-
+  @@index([deletedAt])
+  @@index([isBanned])
+  @@index([hasLoggedInApp])
+  @@index([hasLoggedInPanel])
+  @@index([role, deletedAt])
+  @@index([isBanned, deletedAt])
+  @@index([hasLoggedInApp, isBanned, deletedAt])
+  @@index([hasLoggedInPanel, isBanned, deletedAt])
   @@map("users")
-}
-
-model Workspace {
-  id                  String   @id @default(cuid())
-  name                String
-  description         String?
-  allowedEmailDomains String[] @map("allowed_email_domains")
-  ownerId             String   @map("owner_id")
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
-
-  // Relations — not DB columns, Prisma navigation only
-  owner   User              @relation("WorkspaceOwner", fields: [ownerId], references: [id])
-  members WorkspaceMember[]
-
-  @@map("workspaces")
-}
-
-model WorkspaceMember {
-  id          String        @id @default(cuid())
-  userId      String        @map("user_id")
-  workspaceId String        @map("workspace_id")
-  role        WorkspaceRole @default(MEMBER)
-  createdAt   DateTime      @default(now()) @map("created_at")
-  updatedAt   DateTime      @updatedAt @map("updated_at")
-
-  // Relations — not DB columns, Prisma navigation only
-  user      User      @relation(fields: [userId], references: [id])
-  workspace Workspace @relation(fields: [workspaceId], references: [id])
-
-  @@unique([userId, workspaceId])
-  @@map("workspace_members")
 }
