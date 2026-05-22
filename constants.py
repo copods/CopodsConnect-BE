@@ -11,3 +11,5 @@ JWT_ALGORITHM = "HS256"
 # Pagination defaults
 DEFAULT_PAGE_SIZE = 10
 MAX_PAGE_SIZE = 100
+
+ALLOWED_EMAIL_DOMAIN = "copods.co"

@@ -11,13 +11,14 @@ class AppException(Exception):
         self,
         status_code: int = 500,
         message: str = "Something went wrong.",
-        errors=None
+        errors=None,
+        data=None,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
         self.errors = errors or []
-        self.data = None
+        self.data = data
         self.success = False
 
 
@@ -31,7 +32,7 @@ async def app_exception_handler(request: Request, exc: AppException):
             "success": False,
             "statusCode": exc.status_code,
             "message": exc.message,
-            "data": None,
+            "data": exc.data,
             "errors": exc.errors
         }
     )
