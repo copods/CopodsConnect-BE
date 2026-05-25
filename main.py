@@ -17,6 +17,7 @@ from constants import APP_NAME, API_PREFIX
 from routes import auth
 from routes import users
 from routes.app import auth as app_auth
+from routes.app import posts as app_posts
 from utils.exceptions import (
     AppException,
     app_exception_handler,
@@ -65,6 +66,7 @@ app.include_router(users.users_router, prefix=API_PREFIX)
 
 # --- App Routes ---
 app.include_router(app_auth.app_auth_router, prefix=API_PREFIX)
+app.include_router(app_posts.posts_router, prefix=API_PREFIX)
 
 
 
