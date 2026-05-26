@@ -18,6 +18,7 @@ from routes import auth
 from routes import users
 from routes.app import auth as app_auth
 from routes.app import posts as app_posts
+from routes.app.posts import posts_router
 from utils.exceptions import (
     AppException,
     app_exception_handler,
@@ -63,7 +64,7 @@ app.add_exception_handler(Exception, generic_exception_handler)
 # --- Routes ---
 app.include_router(auth.auth_router, prefix=API_PREFIX)
 app.include_router(users.users_router, prefix=API_PREFIX)
-
+app.include_router(posts_router, prefix=API_PREFIX)
 # --- App Routes ---
 app.include_router(app_auth.app_auth_router, prefix=API_PREFIX)
 app.include_router(app_posts.posts_router, prefix=API_PREFIX)

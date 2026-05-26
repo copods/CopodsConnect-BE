@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, Query
+from typing import Optional
 
 from middlewares.auth import get_current_user
 from services.app import post_service
 from utils.ApiResponse import api_response
 from constants import DEFAULT_PAGE_SIZE
+from prisma.enums import PostType
 from models.schemas.app.posts import (
     CreatePostRequest,
     UpdatePostRequest,
@@ -31,13 +33,13 @@ async def create_post(
 
 @posts_router.get("")
 async def get_feed(
-    page: int = Query(default=1, ge=1),
+    cursor: Optional[str] = Query(default=None),
     page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, alias="pageSize"),
-    post_type: str | None = Query(default=None, alias="type"),
-    author_id: str | None = Query(default=None, alias="authorId"),
+    post_type: Optional[PostType] = Query(default=None, alias="type"),
+    author_id: Optional[str] = Query(default=None, alias="authorId"),
     current_user=Depends(get_current_user),
 ):
-    result = await post_service.get_feed(current_user, page, page_size, post_type, author_id)
+    result = await post_service.get_feed(current_user, cursor, page_size, post_type, author_id)
     return api_response(200, result, "Feed fetched successfully")
 
 

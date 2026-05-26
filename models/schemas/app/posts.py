@@ -1,13 +1,13 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import datetime
-
+from prisma.enums import PostType, ContentStatus
 
 # ── Request schemas ───────────────────────────────────────────
 
 class CreatePostRequest(BaseModel):
     caption: Optional[str] = None
-    type: str = "USER_POST"
+    type: PostType = PostType.USER_POST
     media: list["MediaItem"] = []
     taggedUserIds: list[str] = []
 
@@ -15,12 +15,10 @@ class CreatePostRequest(BaseModel):
 class MediaItem(BaseModel):
     url: str
     order: int = 0
-    altText: Optional[str] = None
-
+    altText: Optional[str] = "Image not found"
 
 class UpdatePostRequest(BaseModel):
     caption: Optional[str] = None
-
 
 class CreateCommentRequest(BaseModel):
     body: str
@@ -30,14 +28,15 @@ class CreateCommentRequest(BaseModel):
 class UpdateCommentRequest(BaseModel):
     body: str
 
-
 # ── Response schemas ──────────────────────────────────────────
 
 class MediaOut(BaseModel):
     id: str
+    postId: str
     url: str
     order: int
     altText: Optional[str] = None
+    createdAt: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -65,7 +64,7 @@ class CommentOut(BaseModel):
     body: str
     authorId: str
     parentId: Optional[str] = None
-    status: str
+    status: ContentStatus
     createdAt: datetime
     updatedAt: datetime
     author: Optional[AuthorOut] = None
@@ -76,9 +75,9 @@ class CommentOut(BaseModel):
 
 class PostOut(BaseModel):
     id: str
-    type: str
+    type: PostType
     caption: Optional[str] = None
-    status: str
+    status: ContentStatus
     sourceUrl: Optional[str] = None
     createdAt: datetime
     updatedAt: datetime
@@ -95,3 +94,20 @@ class PostOut(BaseModel):
 
 class PostDetailOut(PostOut):
     comments: list[CommentOut] = []
+
+class FeedResponse(BaseModel):
+    posts: list[PostOut]
+    nextCursor: Optional[str] = None
+    hasMore: bool 
+
+class LikeResponse(BaseModel):
+    postId: str
+    liked: bool
+    likeCount: int
+
+class DeletePostResponse(BaseModel):
+    deletedPostId: str
+
+class DeleteCommentResponse(BaseModel):
+    deletedCommentId: str
+

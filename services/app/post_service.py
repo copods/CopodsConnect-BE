@@ -1,5 +1,4 @@
-import asyncio
-import math
+#services/app/post_service.py
 from datetime import datetime, timezone
 
 from db.client import db
@@ -13,6 +12,10 @@ from models.schemas.app.posts import (
     TagOut,
     AuthorOut,
     CommentOut,
+    FeedResponse,
+    LikeResponse,
+    DeletePostResponse,
+    DeleteCommentResponse,
 )
 
 POST_INCLUDE = {
@@ -73,7 +76,7 @@ def _serialize_comment(comment) -> CommentOut:
         body=comment.body,
         authorId=comment.authorId,
         parentId=comment.parentId,
-        status=str(comment.status),
+        status=comment.status,
         createdAt=comment.createdAt,
         updatedAt=comment.updatedAt,
         author=_serialize_author(getattr(comment, "author", None)),
@@ -88,14 +91,13 @@ def _serialize_post(post, current_user_id: str, include_comments: bool = False) 
     tags = getattr(post, "tags", []) or []
 
     count_obj = getattr(post, "_count", None)
-    comment_count = count_obj.get("comments", 0) if isinstance(count_obj, dict) else len(comments_rel)
+    comment_count = getattr(count_obj, "comments", None) if count_obj else len(comments_rel)
 
-    data = PostDetailOut if include_comments else PostOut
     payload = {
         "id": post.id,
-        "type": str(post.type),
+        "type": post.type,
         "caption": post.caption,
-        "status": str(post.status),
+        "status": post.status,
         "sourceUrl": post.sourceUrl,
         "createdAt": post.createdAt,
         "updatedAt": post.updatedAt,
@@ -109,80 +111,79 @@ def _serialize_post(post, current_user_id: str, include_comments: bool = False) 
     }
     if include_comments:
         payload["comments"] = [_serialize_comment(c) for c in comments_rel]
+        return PostDetailOut(**payload).model_dump()
 
-    return data(**payload).model_dump()
+    return PostOut(**payload).model_dump()
 
 
 # ── CRUD: Posts ───────────────────────────────────────────────
 
 async def create_post(current_user, body) -> dict:
-    valid_types = {e.value for e in PostType}
-    if body.type not in valid_types:
-        raise AppException(400, f"Invalid post type. Must be one of: {', '.join(sorted(valid_types))}")
-
     post = await db.post.create(
         data={
             "authorId": current_user.id,
             "caption": body.caption,
-            "type": PostType[body.type],
+            "type": body.type,
             "status": ContentStatus.PUBLISHED,
-            "media": {
-                "create": [
+            "media":{
+                "create":[
                     {"url": m.url, "order": m.order, "altText": m.altText}
                     for m in body.media
                 ]
-            } if body.media else None,
-            "tags": {
-                "create": [
+            } if body.media else None, 
+            "tags":{
+                "create":[
                     {"taggedUserId": uid}
                     for uid in body.taggedUserIds
                 ]
-            } if body.taggedUserIds else None,
+            } if body.taggedUserIds else None, 
         },
         include=POST_INCLUDE,
     )
+
     return _serialize_post(post, current_user.id, include_comments=True)
+
 
 
 async def get_feed(
     current_user,
-    page: int = 1,
+    cursor: str | None = None,
     page_size: int = DEFAULT_PAGE_SIZE,
-    post_type: str | None = None,
+    post_type: PostType | None = None,
     author_id: str | None = None,
 ) -> dict:
     page_size = min(page_size, MAX_PAGE_SIZE)
-    skip = (page - 1) * page_size
 
     where: dict = {
         "deletedAt": None,
-        "status": {"in": [ContentStatus.PUBLISHED, ContentStatus.PENDING_SCAN]},
+        "status": ContentStatus.PUBLISHED,
     }
+
     if post_type:
-        where["type"] = PostType[post_type]
+        where["type"] = post_type
     if author_id:
         where["authorId"] = author_id
 
-    total, posts = await asyncio.gather(
-        db.post.count(where=where),
-        db.post.find_many(
-            where=where,
-            skip=skip,
-            take=page_size,
-            order={"createdAt": "desc"},
-            include=FEED_INCLUDE,
-        ),
+    posts = await db.post.find_many(
+        where=where,
+        take=page_size+1, 
+        skip=1 if cursor else 0, 
+        cursor={"id":cursor} if cursor else None, 
+        order={"createdAt": "desc"},
+        include=FEED_INCLUDE,
     )
 
-    total_pages = math.ceil(total / page_size) if total else 0
+    has_more = len(posts) > page_size
+    if has_more:
+        posts = posts[:page_size]
+    
+    next_cursor = posts[-1].id if has_more else None 
 
-    return {
-        "posts": [_serialize_post(p, current_user.id) for p in posts],
-        "total": total,
-        "page": page,
-        "pageSize": page_size,
-        "totalPages": total_pages,
-    }
+    return FeedResponse(
+        posts=[_serialize_post(p,current_user.id) for p in posts],
+        nextCursor=next_cursor,
+        hasMore=has_more,
+    ).model_dump()
 
 
 async def get_post(current_user, post_id: str) -> dict:
@@ -201,6 +202,8 @@ async def update_post(current_user, post_id: str, body) -> dict:
     post = await db.post.find_unique(where={"id": post_id})
     if not post or post.deletedAt is not None:
         raise AppException(404, "Post not found")
+    if post.status == ContentStatus.REMOVED:
+        raise AppException(400, "Post is removed")
     if post.authorId != current_user.id:
         raise AppException(403, "You can only edit your own posts")
 
@@ -216,6 +219,8 @@ async def delete_post(current_user, post_id: str) -> dict:
     post = await db.post.find_unique(where={"id": post_id})
     if not post or post.deletedAt is not None:
         raise AppException(404, "Post not found")
+    if post.status == ContentStatus.REMOVED:
+        raise AppException(400, "Post is removed")
     if post.authorId != current_user.id:
         raise AppException(403, "You can only delete your own posts")
 
@@ -228,7 +233,7 @@ async def delete_post(current_user, post_id: str) -> dict:
             "flagReason": FlagReason.NORMAL,
         },
     )
-    return {"deletedPostId": post_id}
+    return DeletePostResponse(deletedPostId=post_id).model_dump()
 
 
 # ── Likes ─────────────────────────────────────────────────────
@@ -237,7 +242,8 @@ async def like_post(current_user, post_id: str) -> dict:
     post = await db.post.find_unique(where={"id": post_id})
     if not post or post.deletedAt is not None:
         raise AppException(404, "Post not found")
-
+    if post.status == ContentStatus.REMOVED:
+        raise AppException(400, "Post is removed")
     existing = await db.like.find_first(
         where={"postId": post_id, "userId": current_user.id}
     )
@@ -246,14 +252,15 @@ async def like_post(current_user, post_id: str) -> dict:
 
     await db.like.create(data={"postId": post_id, "userId": current_user.id})
     count = await db.like.count(where={"postId": post_id})
-    return {"postId": post_id, "liked": True, "likeCount": count}
+    return LikeResponse(postId=post_id, liked=True, likeCount=count).model_dump()
 
 
 async def unlike_post(current_user, post_id: str) -> dict:
     post = await db.post.find_unique(where={"id": post_id})
     if not post or post.deletedAt is not None:
         raise AppException(404, "Post not found")
-
+    if post.status == ContentStatus.REMOVED:
+        raise AppException(400, "Post is removed")
     existing = await db.like.find_first(
         where={"postId": post_id, "userId": current_user.id}
     )
@@ -262,7 +269,7 @@ async def unlike_post(current_user, post_id: str) -> dict:
 
     await db.like.delete(where={"id": existing.id})
     count = await db.like.count(where={"postId": post_id})
-    return {"postId": post_id, "liked": False, "likeCount": count}
+    return LikeResponse(postId=post_id, liked=False, likeCount=count).model_dump()
 
 
 # ── Comments ──────────────────────────────────────────────────
@@ -271,20 +278,27 @@ async def create_comment(current_user, post_id: str, body) -> dict:
     post = await db.post.find_unique(where={"id": post_id})
     if not post or post.deletedAt is not None:
         raise AppException(404, "Post not found")
+    if post.status == ContentStatus.REMOVED:
+        raise AppException(400, "Post is removed")
 
     if body.parentId:
         parent = await db.comment.find_unique(where={"id": body.parentId})
         if not parent or parent.postId != post_id or parent.deletedAt is not None:
             raise AppException(404, "Parent comment not found")
+        # if replying to a reply, re-point to the top-level comment
         if parent.parentId is not None:
-            raise AppException(400, "Replies can only be one level deep")
+            parent_id = parent.parentId
+        else:
+            parent_id = body.parentId
+    else:
+        parent_id = None
 
     comment = await db.comment.create(
         data={
             "postId": post_id,
             "authorId": current_user.id,
             "body": body.body,
-            "parentId": body.parentId,
+            "parentId": parent_id,
             "status": ContentStatus.PUBLISHED,
         },
         include={"author": True, "replies": {"include": {"author": True}}},
@@ -296,6 +310,8 @@ async def update_comment(current_user, comment_id: str, body) -> dict:
     comment = await db.comment.find_unique(where={"id": comment_id})
     if not comment or comment.deletedAt is not None:
         raise AppException(404, "Comment not found")
+    if comment.status == ContentStatus.REMOVED:
+        raise AppException(400, "Comment is removed")
     if comment.authorId != current_user.id:
         raise AppException(403, "You can only edit your own comments")
 
@@ -311,6 +327,8 @@ async def delete_comment(current_user, comment_id: str) -> dict:
     comment = await db.comment.find_unique(where={"id": comment_id})
     if not comment or comment.deletedAt is not None:
         raise AppException(404, "Comment not found")
+    if comment.status == ContentStatus.REMOVED:
+        raise AppException(400, "Comment is removed")
     if comment.authorId != current_user.id:
         raise AppException(403, "You can only delete your own comments")
 
@@ -323,4 +341,4 @@ async def delete_comment(current_user, comment_id: str) -> dict:
             "flagReason": FlagReason.NORMAL,
         },
     )
-    return {"deletedCommentId": comment_id}
+    return DeleteCommentResponse(deletedCommentId=comment_id).model_dump()
