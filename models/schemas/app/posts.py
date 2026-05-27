@@ -17,6 +17,16 @@ class MediaItem(BaseModel):
     order: int = 0
     altText: Optional[str] = "Image not found"
 
+class MediaUploadUrlRequest(BaseModel):
+    contentType: str = "image/jpeg"
+
+
+class MediaUploadUrlResponse(BaseModel):
+    uploadUrl: str
+    publicUrl: str
+    path: str
+    contentType: str
+
 class UpdatePostRequest(BaseModel):
     caption: Optional[str] = None
 

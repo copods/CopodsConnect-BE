@@ -17,6 +17,7 @@ from models.schemas.app.posts import (
     DeletePostResponse,
     DeleteCommentResponse,
 )
+from services.app import storage_service
 
 POST_INCLUDE = {
     "author": True,
@@ -42,9 +43,13 @@ FEED_INCLUDE = {
     "media": {"order_by": {"order": "asc"}},
     "tags": {"include": {"taggedUser": True}},
     "likes": True,
-    "_count": {"select": {"comments": True}},
+    # "_count": {"select": {"comments": True}},
 }
 
+COMMENT_COUNT_WHERE = {
+    "deletedAt": None,
+    "status": {"not": ContentStatus.REMOVED},
+}
 
 # ── Serializers ───────────────────────────────────────────────
 
@@ -84,14 +89,25 @@ def _serialize_comment(comment) -> CommentOut:
     )
 
 
-def _serialize_post(post, current_user_id: str, include_comments: bool = False) -> dict:
+
+def _serialize_post(
+    post,
+    current_user_id: str,
+    include_comments: bool = False,
+    comment_count: int | None = None,
+) -> dict:
     likes = getattr(post, "likes", []) or []
     comments_rel = getattr(post, "comments", []) or []
     media = getattr(post, "media", []) or []
     tags = getattr(post, "tags", []) or []
 
-    count_obj = getattr(post, "_count", None)
-    comment_count = getattr(count_obj, "comments", None) if count_obj else len(comments_rel)
+    if comment_count is None:
+        count_obj = getattr(post, "_count", None)
+        comment_count = (
+            getattr(count_obj, "comments", None) if count_obj else len(comments_rel)
+        )
+        if comment_count is None:
+            comment_count = 0
 
     payload = {
         "id": post.id,
@@ -111,38 +127,43 @@ def _serialize_post(post, current_user_id: str, include_comments: bool = False) 
     }
     if include_comments:
         payload["comments"] = [_serialize_comment(c) for c in comments_rel]
-        return PostDetailOut(**payload).model_dump()
+        return PostDetailOut(**payload).model_dump(mode="json")
 
-    return PostOut(**payload).model_dump()
+    return PostOut(**payload).model_dump(mode="json")
 
 
 # ── CRUD: Posts ───────────────────────────────────────────────
 
 async def create_post(current_user, body) -> dict:
+    for m in body.media:
+        storage_service.assert_allowed_post_media_url(m.url)
+
+    create_data: dict = {
+        "caption": body.caption,
+        "type": body.type,
+        "status": ContentStatus.PUBLISHED,
+        "author": {"connect": {"id": current_user.id}},
+    }
+
+    if body.media:
+        create_data["media"] = {
+            "create": [
+                {"url": m.url, "order": m.order, "altText": m.altText}
+                for m in body.media
+            ],
+        }
+
+    if body.taggedUserIds:
+        create_data["tags"] = {
+            "create": [{"taggedUserId": uid} for uid in body.taggedUserIds],
+        }
+
     post = await db.post.create(
-        data={
-            "authorId": current_user.id,
-            "caption": body.caption,
-            "type": body.type,
-            "status": ContentStatus.PUBLISHED,
-            "media":{
-                "create":[
-                    {"url": m.url, "order": m.order, "altText": m.altText}
-                    for m in body.media
-                ]
-            } if body.media else None, 
-            "tags":{
-                "create":[
-                    {"taggedUserId": uid}
-                    for uid in body.taggedUserIds
-                ]
-            } if body.taggedUserIds else None, 
-        },
-        include=POST_INCLUDE,
+        data=create_data,
+        include=FEED_INCLUDE,
     )
 
-    return _serialize_post(post, current_user.id, include_comments=True)
-
+    return _serialize_post(post, current_user.id, include_comments=False)
 
 
 async def get_feed(
@@ -178,12 +199,20 @@ async def get_feed(
         posts = posts[:page_size]
     
     next_cursor = posts[-1].id if has_more else None 
-
+    post_ids = [p.id for p in posts]
+    comment_counts = await _comment_counts_for_posts(post_ids)
     return FeedResponse(
-        posts=[_serialize_post(p,current_user.id) for p in posts],
+        posts=[
+            _serialize_post(
+                p,
+                current_user.id,
+                comment_count=comment_counts.get(p.id, 0),
+            )
+            for p in posts
+        ],
         nextCursor=next_cursor,
         hasMore=has_more,
-    ).model_dump()
+    ).model_dump(mode="json")
 
 
 async def get_post(current_user, post_id: str) -> dict:
@@ -233,7 +262,7 @@ async def delete_post(current_user, post_id: str) -> dict:
             "flagReason": FlagReason.NORMAL,
         },
     )
-    return DeletePostResponse(deletedPostId=post_id).model_dump()
+    return DeletePostResponse(deletedPostId=post_id).model_dump(mode="json")
 
 
 # ── Likes ─────────────────────────────────────────────────────
@@ -252,7 +281,7 @@ async def like_post(current_user, post_id: str) -> dict:
 
     await db.like.create(data={"postId": post_id, "userId": current_user.id})
     count = await db.like.count(where={"postId": post_id})
-    return LikeResponse(postId=post_id, liked=True, likeCount=count).model_dump()
+    return LikeResponse(postId=post_id, liked=True, likeCount=count).model_dump(mode="json")
 
 
 async def unlike_post(current_user, post_id: str) -> dict:
@@ -269,7 +298,7 @@ async def unlike_post(current_user, post_id: str) -> dict:
 
     await db.like.delete(where={"id": existing.id})
     count = await db.like.count(where={"postId": post_id})
-    return LikeResponse(postId=post_id, liked=False, likeCount=count).model_dump()
+    return LikeResponse(postId=post_id, liked=False, likeCount=count).model_dump(mode="json")
 
 
 # ── Comments ──────────────────────────────────────────────────
@@ -303,7 +332,7 @@ async def create_comment(current_user, post_id: str, body) -> dict:
         },
         include={"author": True, "replies": {"include": {"author": True}}},
     )
-    return _serialize_comment(comment).model_dump()
+    return _serialize_comment(comment).model_dump(mode="json")
 
 
 async def update_comment(current_user, comment_id: str, body) -> dict:
@@ -320,7 +349,7 @@ async def update_comment(current_user, comment_id: str, body) -> dict:
         data={"body": body.body},
         include={"author": True, "replies": {"include": {"author": True}}},
     )
-    return _serialize_comment(updated).model_dump()
+    return _serialize_comment(updated).model_dump(mode="json")
 
 
 async def delete_comment(current_user, comment_id: str) -> dict:
@@ -341,4 +370,22 @@ async def delete_comment(current_user, comment_id: str) -> dict:
             "flagReason": FlagReason.NORMAL,
         },
     )
-    return DeleteCommentResponse(deletedCommentId=comment_id).model_dump()
+    return DeleteCommentResponse(deletedCommentId=comment_id).model_dump(mode="json")
+
+async def _comment_counts_for_posts(post_ids: list[str]) -> dict[str, int]:
+    if not post_ids:
+        return {}
+    rows = await db.comment.group_by(
+        by=["postId"],
+        where={
+            "postId": {"in": post_ids},
+            **COMMENT_COUNT_WHERE,
+        },
+        count=True,
+    )
+    counts = {pid: 0 for pid in post_ids}
+    for row in rows:
+        pid = row["postId"] if isinstance(row, dict) else row.postId
+        cnt_obj = row["_count"] if isinstance(row, dict) else row._count
+        counts[pid] = cnt_obj["_all"] if isinstance(cnt_obj, dict) else cnt_obj._all
+    return counts    

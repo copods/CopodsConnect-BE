@@ -3,7 +3,9 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from prisma.errors import PrismaError
+import logging
 
+logger = logging.getLogger(__name__)
 
 class AppException(Exception):
     """Single custom exception for all intentional application errors."""
@@ -26,6 +28,7 @@ class AppException(Exception):
 
 async def app_exception_handler(request: Request, exc: AppException):
     """Handles all intentional errors raised via raise AppException(...)"""
+    logger.warning("AppException %s: %s", exc.status_code, exc.message)
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -54,6 +57,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 async def prisma_exception_handler(request: Request, exc: PrismaError):
     """Handles Prisma/DB failures — connection issues, constraint violations etc."""
+    logger.error("PrismaError on %s %s", request.method, request.url.path)
+    logger.exception(exc)
     return JSONResponse(
         status_code=500,
         content={
@@ -68,6 +73,8 @@ async def prisma_exception_handler(request: Request, exc: PrismaError):
 
 async def generic_exception_handler(request: Request, exc: Exception):
     """Catches any unexpected crash that was not explicitly handled."""
+    logger.error("Unhandled error on %s %s", request.method, request.url.path)
+    logger.exception(exc)
     return JSONResponse(
         status_code=500,
         content={

@@ -6,11 +6,14 @@ from services.app import post_service
 from utils.ApiResponse import api_response
 from constants import DEFAULT_PAGE_SIZE
 from prisma.enums import PostType
+from services.app import storage_service
 from models.schemas.app.posts import (
     CreatePostRequest,
     UpdatePostRequest,
     CreateCommentRequest,
     UpdateCommentRequest,
+    MediaUploadUrlRequest,  # add
+    MediaUploadUrlResponse,
 )
 
 posts_router = APIRouter(
@@ -42,6 +45,16 @@ async def get_feed(
     result = await post_service.get_feed(current_user, cursor, page_size, post_type, author_id)
     return api_response(200, result, "Feed fetched successfully")
 
+@posts_router.post("/media/upload-url")
+async def create_media_upload_url(
+    body: MediaUploadUrlRequest,
+    current_user=Depends(get_current_user),
+):
+    result = await storage_service.create_post_media_upload_url(
+        current_user.id,
+        body.contentType,
+    )
+    return api_response(200, result, "Upload URL created")
 
 @posts_router.get("/{post_id}")
 async def get_post(
