@@ -8,8 +8,8 @@ API_PREFIX = f"/api/{API_VERSION}"
 # JWT
 JWT_ALGORITHM = "HS256"
 
-# Pagination defaults
-DEFAULT_PAGE_SIZE = 10
+# Pagination
+DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
 
 ALLOWED_EMAIL_DOMAIN = "copods.co"

@@ -1,10 +1,12 @@
 # routes/users.py
-from fastapi import APIRouter, Depends, UploadFile, File, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, Query
 from fastapi.responses import Response
-from middlewares.auth import require_admin, require_super_admin
+from middlewares.auth import require_admin, require_super_admin, require_platform
 from services import user_service
 from utils.ApiResponse import api_response
+from utils.email import send_invitation_email, send_admin_invitation_email
 from prisma.enums import Role
+from constants import DEFAULT_PAGE_SIZE
 from models.schemas.users import (
     InviteUsersRequest,
     InviteAdminsRequest,
@@ -16,7 +18,25 @@ from models.schemas.users import (
     EditUserRequest,
 )
 
-users_router = APIRouter(prefix="/users", tags=["Users"])
+users_router = APIRouter(
+    prefix="/users",
+    tags=["Users"],
+    dependencies=[Depends(require_platform("panel"))],
+)
+
+
+def _enqueue_invite_emails(
+    background_tasks: BackgroundTasks,
+    emails: list[str],
+    role: Role,
+) -> None:
+    send_fn = (
+        send_admin_invitation_email
+        if role == Role.ADMIN
+        else send_invitation_email
+    )
+    for email in emails:
+        background_tasks.add_task(send_fn, email)
 
 
 # ============================================================
@@ -26,9 +46,16 @@ users_router = APIRouter(prefix="/users", tags=["Users"])
 @users_router.get("")
 async def get_all_users(
     search: str = Query(default=None),
-    current_user=Depends(require_admin)
+    status: str = Query(default=None),
+    status_surface: str = Query(default="app"),
+    role: str = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1),
+    current_user=Depends(require_admin),
 ):
-    result = await user_service.get_all_users(search)
+    result = await user_service.get_all_users(
+        search, status, status_surface, role, page, page_size
+    )
     return api_response(200, result, "Users fetched successfully")
 
 
@@ -38,11 +65,13 @@ async def get_all_users(
 
 @users_router.post("/invite")
 async def invite_users(
+    background_tasks: BackgroundTasks,
     body: InviteUsersRequest,
-    current_user=Depends(require_admin)
+    current_user=Depends(require_admin),
 ):
     result = await user_service.invite_users(body.people)
-    return api_response(200, result, "Users invited successfully")
+    _enqueue_invite_emails(background_tasks, result.pop("emailsToSend", []), Role.MEMBER)
+    return api_response(202, result, "Invite sent. Email is being delivered in the background.")
 
 
 @users_router.get("/invite/bulk/template")
@@ -59,12 +88,18 @@ async def download_bulk_invite_template(current_user=Depends(require_admin)):
 
 @users_router.post("/invite/bulk")
 async def bulk_invite_users(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    current_user=Depends(require_admin)
+    current_user=Depends(require_admin),
 ):
     file_bytes = await file.read()
     result = await user_service.bulk_invite_users(file_bytes, file.filename, role=Role.MEMBER)
-    return api_response(200, result, "Bulk invitations processed successfully")
+    _enqueue_invite_emails(background_tasks, result.pop("emailsToSend", []), Role.MEMBER)
+    return api_response(
+        202,
+        result,
+        "Bulk invite processed. Emails are being delivered in the background.",
+    )
 
 
 @users_router.post("/invite/resend")
@@ -82,21 +117,29 @@ async def resend_invite(
 
 @users_router.post("/admins/invite")
 async def invite_admins(
+    background_tasks: BackgroundTasks,
     body: InviteAdminsRequest,
-    current_user=Depends(require_super_admin)
+    current_user=Depends(require_super_admin),
 ):
     result = await user_service.invite_admins(body.people)
-    return api_response(200, result, "Admins invited successfully")
+    _enqueue_invite_emails(background_tasks, result.pop("emailsToSend", []), Role.ADMIN)
+    return api_response(202, result, "Invite sent. Email is being delivered in the background.")
 
 
 @users_router.post("/admins/invite/bulk")
 async def bulk_invite_admins(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    current_user=Depends(require_super_admin)
+    current_user=Depends(require_super_admin),
 ):
     file_bytes = await file.read()
     result = await user_service.bulk_invite_users(file_bytes, file.filename, role=Role.ADMIN)
-    return api_response(200, result, "Bulk admin invitations processed successfully")
+    _enqueue_invite_emails(background_tasks, result.pop("emailsToSend", []), Role.ADMIN)
+    return api_response(
+        202,
+        result,
+        "Bulk invite processed. Emails are being delivered in the background.",
+    )
 
 
 @users_router.post("/admins/invite/resend")

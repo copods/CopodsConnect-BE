@@ -1,5 +1,7 @@
 # services/user_service.py
+import asyncio
 import io
+import math
 import re
 import openpyxl
 from openpyxl.styles import Alignment
@@ -9,7 +11,7 @@ from db.client import db
 from prisma.enums import Role
 from utils.exceptions import AppException
 from utils.email import send_invitation_email, send_admin_invitation_email, send_promotion_email, send_demotion_email
-from constants import ALLOWED_EMAIL_DOMAIN
+from constants import ALLOWED_EMAIL_DOMAIN, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 
 BULK_INVITE_WORKSHEET_NAME = "Invitations"
 
@@ -54,13 +56,11 @@ def build_bulk_invite_template_workbook_bytes() -> bytes:
 
 def _is_user_banned_for_display(user) -> bool:
     """
-    True when the user should be shown as banned (matches derive_status ban semantics).
-    Temporary bans that have elapsed are treated as not banned for display.
+    True when the user has an active time-bound ban for display purposes.
+    Elapsed bans and isBanned without bannedUntil are not shown as banned.
     """
-    if not user.isBanned:
+    if not user.isBanned or user.bannedUntil is None:
         return False
-    if user.bannedUntil is None:
-        return True
     now = datetime.now(timezone.utc)
     banned_until = (
         user.bannedUntil.replace(tzinfo=timezone.utc)
@@ -70,17 +70,10 @@ def _is_user_banned_for_display(user) -> bool:
     return now < banned_until
 
 
-def derive_status(user) -> str:
-    """Global activation: invited until first login on any surface; active after either."""
-    if _is_user_banned_for_display(user):
-        return "BANNED"
-    if not user.hasLoggedInApp and not user.hasLoggedInPanel:
-        return "INVITED"
-    return "ACTIVE"
-
-
 def derive_app_status(user) -> str:
-    """App surface: invited until first app OAuth; active after; banned applies globally."""
+    """App surface: deleted, banned, invited until first app OAuth, else active."""
+    if user.deletedAt is not None:
+        return "DELETED"
     if _is_user_banned_for_display(user):
         return "BANNED"
     if not user.hasLoggedInApp:
@@ -89,7 +82,9 @@ def derive_app_status(user) -> str:
 
 
 def derive_panel_status(user) -> str:
-    """Panel surface: invited until first panel OAuth; active after; banned applies globally."""
+    """Panel surface: deleted, banned, invited until first panel OAuth, else active."""
+    if user.deletedAt is not None:
+        return "DELETED"
     if _is_user_banned_for_display(user):
         return "BANNED"
     if not user.hasLoggedInPanel:
@@ -107,7 +102,6 @@ def serialize_user(u) -> dict:
         "dateOfJoining": u.dateOfJoining.isoformat() if u.dateOfJoining else None,
         "birthdate": u.birthdate.isoformat() if u.birthdate else None,
         "role": str(u.role),
-        "status": derive_status(u),
         "appStatus": derive_app_status(u),
         "panelStatus": derive_panel_status(u),
         "isBanned": u.isBanned,
@@ -134,18 +128,52 @@ async def invite_admins(people: list) -> dict:
     return await _process_person_invites(people, role=Role.ADMIN)
 
 
+async def _batch_invite_create(
+    create_payloads: list[dict],
+    skipped: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """
+    Prefetch existing emails, create_many new users, return invited rows and emails to send.
+    """
+    invited: list[dict] = []
+    emails_to_send: list[str] = []
+
+    if not create_payloads:
+        return invited, emails_to_send
+
+    all_emails = [p["email"] for p in create_payloads]
+    existing_users = await db.user.find_many(where={"email": {"in": all_emails}})
+    existing_emails = {u.email for u in existing_users}
+
+    to_create: list[dict] = []
+    for create_data in create_payloads:
+        email = create_data["email"]
+        if email in existing_emails:
+            skipped.append({"email": email, "reason": "User already exists"})
+            continue
+        to_create.append(create_data)
+
+    if to_create:
+        await db.user.create_many(data=to_create)
+        for create_data in to_create:
+            invited.append({"email": create_data["email"]})
+            emails_to_send.append(create_data["email"])
+
+    return invited, emails_to_send
+
+
 async def _process_person_invites(people: list, role: Role) -> dict:
     """
     Process invite for a list of person objects.
     Each person has email (required) + optional name, designation, dateOfJoining, birthdate.
     """
-    invited = []
-    skipped = []
+    invited: list[dict] = []
+    skipped: list[dict] = []
+    create_payloads: list[dict] = []
 
     for person in people:
         email = str(person.email)
 
-        # Domain check
         if not email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
             skipped.append({
                 "email": email,
@@ -153,13 +181,7 @@ async def _process_person_invites(people: list, role: Role) -> dict:
             })
             continue
 
-        existing_user = await db.user.find_unique(where={"email": email})
-        if existing_user:
-            skipped.append({"email": email, "reason": "User already exists"})
-            continue
-
-        # Build create payload — only include optional fields if provided
-        create_data = {"email": email, "role": role}
+        create_data: dict = {"email": email, "role": role}
 
         if person.name and str(person.name).strip():
             create_data["name"] = str(person.name).strip()
@@ -170,59 +192,85 @@ async def _process_person_invites(people: list, role: Role) -> dict:
         if person.birthdate:
             create_data["birthdate"] = person.birthdate
 
-        await db.user.create(data=create_data)
+        create_payloads.append(create_data)
 
-        if role == Role.ADMIN:
-            send_admin_invitation_email(email)
-        else:
-            send_invitation_email(email)
-
-        invited.append({"email": email})
+    batch_invited, emails_to_send = await _batch_invite_create(create_payloads, skipped)
+    invited.extend(batch_invited)
 
     return {
         "invited": invited,
-        "skipped": skipped
+        "skipped": skipped,
+        "emailsToSend": emails_to_send,
     }
 
 
-async def _process_email_invites(emails: list, role: Role) -> dict:
-    invited = []
-    skipped = []
+def _parse_excel_rows(file_bytes: bytes) -> tuple[list[dict], list[dict]]:
+    """
+    CPU-bound Excel parse — run via asyncio.to_thread from async handlers.
+    Returns (valid_row_dicts, skipped_entries).
+    """
+    try:
+        workbook = openpyxl.load_workbook(io.BytesIO(file_bytes))
+    except Exception:
+        raise AppException(400, "Invalid Excel file")
 
-    for email in emails:
-        # Domain check — only @copods.co emails allowed
-        if not email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
-            skipped.append({
-                "email": email,
-                "reason": f"Only @{ALLOWED_EMAIL_DOMAIN} emails can be invited"
-            })
+    sheet = _worksheet_for_bulk_invite(workbook)
+
+    raw_headers = [cell.value for cell in sheet[1]]
+    header_map = {}
+    for i, header in enumerate(raw_headers):
+        if header:
+            header_map[str(header).strip().lower()] = i
+
+    if "email" not in header_map:
+        raise AppException(400, "Email column not found in the Excel file")
+
+    email_idx = header_map.get("email", -1)
+    name_idx = header_map.get("name", -1)
+    designation_idx = header_map.get("designation", -1)
+    doj_idx = header_map.get("dateofjoining", -1)
+    birthdate_idx = header_map.get("birthdate", header_map.get("birthday", -1))
+
+    def get_cell(row, idx):
+        if idx == -1 or idx >= len(row):
+            return None
+        val = row[idx]
+        if val is None:
+            return None
+        return str(val).strip() if not isinstance(val, datetime) else val
+
+    def parse_date(val):
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val
+        try:
+            return datetime.fromisoformat(str(val))
+        except Exception:
+            return None
+
+    email_regex = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    raw_rows: list[dict] = []
+    skipped: list[dict] = []
+
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        email_val = get_cell(row, email_idx)
+        if not email_val:
             continue
 
-        existing_user = await db.user.find_unique(where={"email": email})
-
-        if existing_user:
-            skipped.append({"email": email, "reason": "User already exists"})
+        if not email_regex.match(email_val):
+            skipped.append({"email": email_val, "reason": "Invalid email format"})
             continue
 
-        await db.user.create(
-            data={
-                "email": email,
-                "role": role
-            }
-        )
+        raw_rows.append({
+            "email": email_val,
+            "name": get_cell(row, name_idx),
+            "designation": get_cell(row, designation_idx),
+            "dateOfJoining": parse_date(get_cell(row, doj_idx)),
+            "birthdate": parse_date(get_cell(row, birthdate_idx)),
+        })
 
-        # Send appropriate email based on role
-        if role == Role.ADMIN:
-            send_admin_invitation_email(email)
-        else:
-            send_invitation_email(email)
-
-        invited.append({"email": email})
-
-    return {
-        "invited": invited,
-        "skipped": skipped
-    }
+    return raw_rows, skipped
 
 
 async def bulk_invite_users(file_bytes: bytes, filename: str, role: Role = Role.MEMBER) -> dict:
@@ -234,90 +282,23 @@ async def bulk_invite_users(file_bytes: bytes, filename: str, role: Role = Role.
     if not filename.lower().endswith(".xlsx") and not filename.lower().endswith(".xls"):
         raise AppException(400, "Invalid file format. Only .xlsx and .xls files are allowed")
 
-    try:
-        workbook = openpyxl.load_workbook(io.BytesIO(file_bytes))
-    except Exception:
-        raise AppException(400, "Invalid Excel file")
-
-    sheet = _worksheet_for_bulk_invite(workbook)
-
-    # Map header names to column indices (case insensitive, 0-based)
-    raw_headers = [cell.value for cell in sheet[1]]
-    header_map = {}
-    for i, header in enumerate(raw_headers):
-        if header:
-            header_map[str(header).strip().lower()] = i
-
-    if "email" not in header_map:
-        raise AppException(400, "Email column not found in the Excel file")
-
-    # Column indices (-1 means not present in sheet)
-    email_idx        = header_map.get("email", -1)
-    name_idx         = header_map.get("name", -1)
-    designation_idx  = header_map.get("designation", -1)
-    doj_idx          = header_map.get("dateofjoining", -1)  # matches "dateOfJoining" header
-    birthdate_idx = header_map.get("birthdate", header_map.get("birthday", -1))
-
-    def get_cell(row, idx):
-        """Safely get a cell value by index, returns None if index is -1 or out of range."""
-        if idx == -1 or idx >= len(row):
-            return None
-        val = row[idx]
-        if val is None:
-            return None
-        return str(val).strip() if not isinstance(val, datetime) else val
-
-    # Extract rows
-    email_regex = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-    raw_rows = []
-    skipped = []
-
-    for row in sheet.iter_rows(min_row=2, values_only=True):
-        email_val = get_cell(row, email_idx)
-        if not email_val:
-            continue
-
-        if not email_regex.match(email_val):
-            skipped.append({"email": email_val, "reason": "Invalid email format"})
-            continue
-
-        # Parse optional date fields — accept datetime objects or ISO strings
-        def parse_date(val):
-            if val is None:
-                return None
-            if isinstance(val, datetime):
-                return val
-            try:
-                return datetime.fromisoformat(str(val))
-            except Exception:
-                return None
-
-        raw_rows.append({
-            "email": email_val,
-            "name": get_cell(row, name_idx),
-            "designation": get_cell(row, designation_idx),
-            "dateOfJoining": parse_date(get_cell(row, doj_idx)),
-            "birthdate": parse_date(get_cell(row, birthdate_idx)),
-        })
+    raw_rows, skipped = await asyncio.to_thread(_parse_excel_rows, file_bytes)
 
     if not raw_rows:
         raise AppException(400, "No valid emails found in the Excel file")
 
-    # Process invites with profile data
-    invited = []
+    create_payloads: list[dict] = []
     for row_data in raw_rows:
         email = row_data["email"]
 
         if not email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
-            skipped.append({"email": email, "reason": f"Only @{ALLOWED_EMAIL_DOMAIN} emails can be invited"})
+            skipped.append({
+                "email": email,
+                "reason": f"Only @{ALLOWED_EMAIL_DOMAIN} emails can be invited",
+            })
             continue
 
-        existing_user = await db.user.find_unique(where={"email": email})
-        if existing_user:
-            skipped.append({"email": email, "reason": "User already exists"})
-            continue
-
-        create_data = {"email": email, "role": role}
+        create_data: dict = {"email": email, "role": role}
 
         if row_data["name"]:
             create_data["name"] = row_data["name"]
@@ -328,21 +309,17 @@ async def bulk_invite_users(file_bytes: bytes, filename: str, role: Role = Role.
         if row_data["birthdate"]:
             create_data["birthdate"] = row_data["birthdate"]
 
-        await db.user.create(data=create_data)
+        create_payloads.append(create_data)
 
-        if role == Role.ADMIN:
-            send_admin_invitation_email(email)
-        else:
-            send_invitation_email(email)
-
-        invited.append({"email": email})
+    invited, emails_to_send = await _batch_invite_create(create_payloads, skipped)
 
     return {
         "invited": invited,
         "skipped": skipped,
+        "emailsToSend": emails_to_send,
         "totalProcessed": len(raw_rows) + len([s for s in skipped if "Invalid email format" in s.get("reason", "")]),
         "totalInvited": len(invited),
-        "totalSkipped": len(skipped)
+        "totalSkipped": len(skipped),
     }
 
 
@@ -362,10 +339,16 @@ async def resend_invite(emails: list) -> dict:
             skipped.append({"email": email, "reason": "User not found"})
             continue
 
+        if user.role == Role.SUPER_ADMIN:
+            raise AppException(
+                400,
+                "Super admins are hardcoded in the system and cannot be re-invited.",
+            )
+
         if user.role == Role.ADMIN:
-            send_admin_invitation_email(email)
+            await send_admin_invitation_email(email)
         else:
-            send_invitation_email(email)
+            await send_invitation_email(email)
 
         sent.append({"email": email})
 
@@ -482,9 +465,6 @@ def _check_ban_permission(caller, target_user):
 
 
 async def ban_user(current_user, target_user_id: str, duration_hours: int, reason: str) -> dict:
-    if current_user.id == target_user_id:
-        raise AppException(400, "You cannot ban yourself")
-
     target_user = await db.user.find_unique(where={"id": target_user_id})
 
     if not target_user:
@@ -609,9 +589,9 @@ async def change_role(current_user, target_user_id: str, new_role: str) -> dict:
     )
 
     if new_role == "ADMIN":
-        send_promotion_email(updated_user.email)
+        await send_promotion_email(updated_user.email)
     elif new_role == "MEMBER":
-        send_demotion_email(updated_user.email)
+        await send_demotion_email(updated_user.email)
 
     return {
         "userId": updated_user.id,
@@ -661,22 +641,84 @@ async def edit_user(current_user, target_user_id: str, updates: dict) -> dict:
 # GET ALL USERS
 # ============================================================
 
-async def get_all_users(search: str = None) -> list:
-    if search:
-        users = await db.user.find_many(
-            where={
-                "deletedAt": None,
-                "OR": [
-                    {"email": {"contains": search, "mode": "insensitive"}},
-                    {"name": {"contains": search, "mode": "insensitive"}}
-                ]
-            },
-            order={"createdAt": "desc"}
-        )
-    else:
-        users = await db.user.find_many(
-            where={"deletedAt": None},
-            order={"createdAt": "desc"}
-        )
+VALID_LIST_STATUSES = frozenset({"ACTIVE", "INVITED", "BANNED", "DELETED"})
 
-    return [serialize_user(u) for u in users]
+
+VALID_STATUS_SURFACES = frozenset({"app", "panel"})
+
+
+async def get_all_users(
+    search: str = None,
+    status: str = None,
+    status_surface: str = "app",
+    role: str = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> dict:
+    if status is not None and status not in VALID_LIST_STATUSES:
+        raise AppException(
+            400,
+            f"Invalid status. Must be one of: {', '.join(sorted(VALID_LIST_STATUSES))}",
+        )
+    if status_surface not in VALID_STATUS_SURFACES:
+        raise AppException(400, "Invalid status_surface. Must be 'app' or 'panel'.")
+
+    page_size = min(page_size, MAX_PAGE_SIZE)
+    skip = (page - 1) * page_size
+
+    # Always start with deletedAt filter
+    where: dict = {}
+
+    if status == "DELETED":
+        where["deletedAt"] = {"not": None}
+    else:
+        where["deletedAt"] = None
+
+        # Translate derived status into real DB column conditions
+        if status == "ACTIVE":
+            login_field = "hasLoggedInPanel" if status_surface == "panel" else "hasLoggedInApp"
+            where[login_field] = True
+            where["isBanned"] = False
+
+        elif status == "INVITED":
+            login_field = "hasLoggedInPanel" if status_surface == "panel" else "hasLoggedInApp"
+            where[login_field] = False
+            where["isBanned"] = False
+
+        elif status == "BANNED":
+            where["isBanned"] = True
+            where["bannedUntil"] = {
+                "gt": datetime.now(timezone.utc)
+            }
+
+    # Role filter
+    if role is not None:
+        where["role"] = role
+
+    # Search filter
+    if search:
+        where["OR"] = [
+            {"email": {"contains": search, "mode": "insensitive"}},
+            {"name": {"contains": search, "mode": "insensitive"}},
+        ]
+
+    # Run count and find_many in parallel — single round trip
+    total, users = await asyncio.gather(
+        db.user.count(where=where),
+        db.user.find_many(
+            where=where,
+            skip=skip,
+            take=page_size,
+            order={"createdAt": "desc"},
+        ),
+    )
+
+    total_pages = math.ceil(total / page_size) if total else 0
+
+    return {
+        "users": [serialize_user(u) for u in users],
+        "total": total,
+        "page": page,
+        "pageSize": page_size,
+        "totalPages": total_pages,
+    }

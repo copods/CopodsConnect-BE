@@ -9,8 +9,8 @@ from prisma.enums import Role
 from utils.exceptions import AppException
 from utils.ban_check import raise_if_user_ban_active
 from constants import JWT_ALGORITHM, ALLOWED_EMAIL_DOMAIN
-from models.schemas.auth import AuthResponse, UserOut
-from services.user_service import derive_app_status, derive_panel_status, derive_status
+from models.schemas.auth import AuthResponse, UserOut , GoogleInitResponse
+from services.user_service import derive_app_status, derive_panel_status
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -23,7 +23,7 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
-def get_google_auth_url() -> str:
+def get_google_auth_url() -> dict:
     """
     Builds the Google OAuth authorization URL.
     Frontend redirects user to this URL to begin login.
@@ -37,14 +37,15 @@ def get_google_auth_url() -> str:
         "access_type": "offline",
         "prompt": "select_account",
     }
-    return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
+    return GoogleInitResponse(auth_url=f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}").model_dump()
 
 
-async def _exchange_code_for_tokens(code: str) -> dict:
+async def _exchange_code_for_tokens(code: str, redirect_uri:str | None=None) -> dict:
     """
     Exchanges the one-time code from Google for access + id tokens.
     Private function — only called by handle_google_callback.
     """
+    uri = redirect_uri or GOOGLE_REDIRECT_URI
     async with httpx.AsyncClient() as client:
         token_response = await client.post(
             GOOGLE_TOKEN_URL,
@@ -52,7 +53,7 @@ async def _exchange_code_for_tokens(code: str) -> dict:
                 "code": code,
                 "client_id": GOOGLE_CLIENT_ID,
                 "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "redirect_uri": uri,
                 "grant_type": "authorization_code",
             }
         )
@@ -81,10 +82,11 @@ async def _get_google_user_info(access_token: str) -> dict:
     return user_response.json()
 
 
-async def _get_or_create_user(user_info: dict, platform: str):
+async def _get_and_update_user(user_info: dict, platform: str):
     """
-    Validates email domain, then gets or creates the user in DB.
-    Private function — only called by handle_google_callback.
+    Fetches an existing invited user by email and updates their profile fields
+    (name, picture, googleSub) and login flags on OAuth callback.
+    Never creates a new user.
 
     Domain check happens before any DB operation —
     if the email is not @copods.co, the request is rejected immediately.
@@ -121,8 +123,8 @@ async def _get_or_create_user(user_info: dict, platform: str):
     if existing_user:
         if existing_user.deletedAt is not None:
             raise AppException(403, "This account has been deleted. Please contact your administrator.")
-        # Block login while ban is active (permanent or temporary, not yet elapsed).
-        # Expired temporary ban: clear in DB before issuing a token or updating profile.
+        # Block login while ban is active (time-bound, not yet elapsed).
+        # Expired ban: clear in DB before issuing a token or updating profile.
         if existing_user.isBanned:
             raise_if_user_ban_active(existing_user)
             await db.user.update(
@@ -172,7 +174,7 @@ async def handle_google_callback(code: str, platform: str) -> dict:
     Full OAuth callback flow:
     1. Exchange code for tokens
     2. Fetch user info from Google
-    3. Validate domain + get or create user in DB
+    3. Validate domain + fetch and update invited user in DB
     4. Set hasLoggedInApp or hasLoggedInPanel based on platform
     5. Issue JWT with platform embedded
     6. Return token + user
@@ -185,7 +187,7 @@ async def handle_google_callback(code: str, platform: str) -> dict:
 
     user_info = await _get_google_user_info(access_token)
 
-    user = await _get_or_create_user(user_info, platform)
+    user = await _get_and_update_user(user_info, platform)
 
     token = _create_jwt(user, platform)
 
@@ -197,7 +199,6 @@ async def handle_google_callback(code: str, platform: str) -> dict:
             name=user.name,
             picture=user.picture,
             role=str(user.role),
-            status=derive_status(user),
             appStatus=derive_app_status(user),
             panelStatus=derive_panel_status(user),
         )
