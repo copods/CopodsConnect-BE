@@ -1,0 +1,83 @@
+name: Deploy to Dev
+
+# Triggers only when a PR is merged into dev — not on direct pushes
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - dev
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+
+    env:
+      AWS_REGION: ap-south-1
+      PROJECT_NAME: copodsconnect
+      ENVIRONMENT: dev
+
+    steps:
+      # --------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # --------------------------------------------------------
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # --------------------------------------------------------
+      - name: Build & push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE="$ECR_REGISTRY/$PROJECT_NAME-$ENVIRONMENT"
+
+          docker build \
+            --platform linux/amd64 \
+            -t "$IMAGE:$IMAGE_TAG" \
+            -t "$IMAGE:latest" \
+            .
+
+          docker push "$IMAGE:$IMAGE_TAG"
+          docker push "$IMAGE:latest"
+
+          echo "image=$IMAGE:$IMAGE_TAG" >> $GITHUB_OUTPUT
+        id: build
+
+      # --------------------------------------------------------
+      - name: Force ECS redeploy
+        run: |
+          aws ecs update-service \
+            --cluster "$PROJECT_NAME-$ENVIRONMENT" \
+            --service "$PROJECT_NAME-$ENVIRONMENT" \
+            --force-new-deployment \
+            --region "$AWS_REGION" \
+            --output text --query 'service.serviceName'
+
+      # --------------------------------------------------------
+      - name: Wait for service to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster "$PROJECT_NAME-$ENVIRONMENT" \
+            --services "$PROJECT_NAME-$ENVIRONMENT" \
+            --region "$AWS_REGION"
+
+      # --------------------------------------------------------
+      - name: Print API URL
+        run: |
+          echo "✅ Dev deploy complete"
+          echo "PR: ${{ github.event.pull_request.title }}"
+          echo "Merged by: ${{ github.event.pull_request.merged_by.login }}"
+          echo "Image: ${{ steps.build.outputs.image }}"

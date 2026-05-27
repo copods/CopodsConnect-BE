@@ -71,4 +71,4 @@ app.include_router(app_auth.app_auth_router, prefix=API_PREFIX)
 # --- Health check ---
 @app.get("/health")
 async def health():
-    return api_response(200, message="OK")
+    return api_response(200, message="OK12")
