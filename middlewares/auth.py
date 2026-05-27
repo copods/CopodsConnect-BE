@@ -10,7 +10,7 @@ from utils.ban_check import raise_if_user_ban_active
 from utils.allowed_email import is_allowed_signin_email
 from constants import JWT_ALGORITHM
 from prisma.enums import Role
-
+from utils.allowed_email import is_allowed_signin_email
 security = HTTPBearer()
 
 

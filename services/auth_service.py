@@ -17,8 +17,6 @@ from utils.allowed_email import (
 from constants import JWT_ALGORITHM, ALLOWED_EMAIL_DOMAIN
 from models.schemas.auth import AuthResponse, UserOut, GoogleInitResponse
 from services.user_service import derive_app_status, derive_panel_status
-from google.oauth2 import id_token as google_id_token
-from google.auth.transport import requests as google_requests
 
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
@@ -30,14 +28,14 @@ JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
-GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
+
 
 
 def get_google_auth_url() -> dict:
     """
-    Google OAuth URL. ``hd=copods.co`` limits the account picker to Copods Workspace
-    accounts (Google may still offer "Use another account"). Server-side checks run
-    before any JWT is issued — not after the client redirect.
+    Builds the Google OAuth authorization URL.
+    Frontend redirects user to this URL to begin login.
+    No async needed — pure string construction.
     """
     params = {
         "client_id": GOOGLE_CLIENT_ID,
@@ -46,7 +44,6 @@ def get_google_auth_url() -> dict:
         "scope": "openid email profile",
         "access_type": "offline",
         "prompt": "select_account",
-        "hd": COPODS_SIGNIN_DOMAIN,
     }
     return GoogleInitResponse(auth_url=f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}").model_dump()
 
@@ -93,31 +90,6 @@ async def _get_google_user_info(access_token: str) -> dict:
     return user_response.json()
 
 
-async def _verify_google_id_token(id_token: str) -> dict:
-    """Validate id_token with Google; returns claims (email, hd, aud, …)."""
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            GOOGLE_TOKENINFO_URL,
-            params={"id_token": id_token},
-        )
-    if response.status_code != 200:
-        raise GoogleLoginDomainDenied()
-    claims = response.json()
-    aud = claims.get("aud") or claims.get("azp")
-    if aud != GOOGLE_CLIENT_ID:
-        raise GoogleLoginDomainDenied()
-    return claims
-
-
-def _enforce_copods_signin_policy(user_info: dict, id_token_claims: dict | None) -> str:
-    try:
-        return assert_copods_google_workspace(
-            userinfo=user_info,
-            id_token_claims=id_token_claims,
-        )
-    except ValueError:
-        raise GoogleLoginDomainDenied() from None
-
 
 # ── Web / Panel flow ─────────────────────────────────────────────
 # Used by POST /auth/google/callback (code exchange with platform)
@@ -150,8 +122,8 @@ async def _get_and_update_user(user_info: dict, platform: str):
             f"Access restricted to @{ALLOWED_EMAIL_DOMAIN} accounts only"
         )
 
-    if platform not in ("app", "panel"):
-        raise AppException(400, "Invalid platform. Must be 'app' or 'panel'")
+    if platform != "panel":
+        raise AppException(400, "Invalid platform. Must be 'panel'")
 
     login_flag = "hasLoggedInApp" if platform == "app" else "hasLoggedInPanel"
 
@@ -188,51 +160,8 @@ async def _get_and_update_user(user_info: dict, platform: str):
     return user
 
 
-# ── Mobile flow ───────────────────────────────────────────────────
-# Used by POST /auth/google/verify (idToken from mobile client)
 
-async def _get_or_create_user(user_info: dict, verified_email: str):
-    """
-    Mobile login: looks up user by googleSub, creates if not found.
-    Domain check runs before any DB operation.
-    """
-    google_sub = user_info.get("sub")
-    name = user_info.get("name")
-    picture = user_info.get("picture")
-
-    if not verified_email or not google_sub:
-        raise AppException(400, "Google account missing required information")
-
-    if not is_allowed_signin_email(verified_email):
-        raise GoogleLoginDomainDenied()
-
-    existing_user = await db.user.find_unique(where={"googleSub": google_sub})
-
-    if existing_user:
-        if not is_allowed_signin_email(existing_user.email):
-            raise GoogleLoginDomainDenied()
-        user = await db.user.update(
-            where={"googleSub": google_sub},
-            data={"name": name, "picture": picture, "email": verified_email},
-        )
-    else:
-        user = await db.user.create(
-            data={
-                "email": verified_email,
-                "googleSub": google_sub,
-                "name": name,
-                "picture": picture,
-                "role": Role.MEMBER,
-            }
-        )
-
-    if not is_allowed_signin_email(user.email):
-        raise GoogleLoginDomainDenied()
-
-    return user
-
-
-def _create_jwt(user, platform: str = "app") -> str:
+def _create_jwt(user, platform: str ) -> str:
     """
     Creates the platform JWT session token.
     Contains user id, email, role, and platform.
@@ -290,42 +219,3 @@ async def handle_google_callback(code: str, platform: str) -> dict:
     ).model_dump()
 
 
-async def verify_google_id_token_flow(token: str) -> dict:
-    """
-    Mobile login flow: validates Google idToken directly (no code exchange).
-    1. Verify idToken via google-auth library
-    2. Enforce @copods.co domain
-    3. Get or create user in DB
-    4. Issue JWT
-    """
-    try:
-        idinfo = google_id_token.verify_oauth2_token(
-            token,
-            google_requests.Request(),
-            GOOGLE_CLIENT_ID
-        )
-        email = normalize_email(idinfo.get("email"))
-
-        if not is_allowed_signin_email(email):
-            raise GoogleLoginDomainDenied()
-
-        user_info = {
-            "email": email,
-            "name": idinfo.get("name"),
-            "picture": idinfo.get("picture"),
-            "sub": idinfo.get("sub"),
-        }
-        user = await _get_or_create_user(user_info, email)
-        jwt_token = _create_jwt(user, "app")
-        return {
-            "token": jwt_token,
-            "user": {
-                "id": user.id,
-                "email": user.email,
-                "name": user.name,
-                "picture": user.picture,
-                "role": str(user.role)
-            }
-        }
-    except ValueError:
-        raise AppException(401, "Invalid Google token")
