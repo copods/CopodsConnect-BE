@@ -42,6 +42,12 @@ model User {
   updatedAt        DateTime  @updatedAt @map("updated_at")
   deletedAt        DateTime? @map("deleted_at")
 
+  // Relations — not DB columns, Prisma navigation only 
+  authoredPosts Post[]    @relation("PostAuthor")
+  taggedInPosts PostTag[] @relation("TaggedInPosts")
+  likes         Like[]    @relation("UserLikes")
+  comments      Comment[] @relation("CommentAuthor")
+
   @@index([deletedAt])
   @@index([isBanned])
   @@index([hasLoggedInApp])
@@ -51,4 +57,129 @@ model User {
   @@index([hasLoggedInApp, isBanned, deletedAt])
   @@index([hasLoggedInPanel, isBanned, deletedAt])
   @@map("users")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum PostType {
+  USER_POST
+  APPRECIATION
+  SYSTEM_BIRTHDATE
+  SYSTEM_ANNIVERSARY
+  LINKEDIN_IMPORT
+}
+
+// Applies to both Post and Comment
+enum ContentStatus {
+  PENDING_SCAN  // just created, awaiting moderation check
+  PUBLISHED     // passed moderation, visible in feed
+  FLAGGED       // failed moderation, hidden from feed
+  REMOVED       // hidden from feed — either user deleted their own post (flagReason = NORMAL) or system/admin removed it for policy violation (flagReason = NSFW_*)
+}
+
+// Reason a Post or Comment was flagged
+enum FlagReason {
+  NSFW_TEXT     // caption or comment body failed text moderation
+  NSFW_IMAGE    // one or more images in the post failed image moderation
+  UNSAFE_LINK   // caption contains a link that failed safety check
+  NORMAL        // user deleted their own content — no policy violation
+}
+
+// ============================================================
+// FEED MODELS
+// ============================================================
+
+
+model Post {
+  id         String        @id @default(cuid())
+  type       PostType      @default(USER_POST)
+  authorId   String?       @map("author_id")
+  caption    String?       // supports markdown
+  status     ContentStatus @default(PENDING_SCAN)
+  sourceUrl  String?       @map("source_url")  // populated for LINKEDIN_IMPORT only
+  flagReason FlagReason?   @map("flag_reason") // null until moderation runs
+  flaggedAt  DateTime?     @map("flagged_at")  // null unless status = FLAGGED or REMOVED
+  deletedAt  DateTime?     @map("deleted_at")  // timestamp used by purge job for 30-day hard delete window
+  createdAt  DateTime      @default(now()) @map("created_at")
+  updatedAt  DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  author   User?       @relation("PostAuthor", fields: [authorId], references: [id])
+  media    PostMedia[]
+  tags     PostTag[]
+  likes    Like[]
+  comments Comment[]
+
+  @@index([status, deletedAt, createdAt(sort: Desc)]) // primary feed query index
+  @@index([authorId, status, deletedAt])              // "my posts" query
+  @@index([type, deletedAt])                          // filter by post type
+  @@map("posts")
+}
+
+model PostMedia {
+  id        String   @id @default(cuid())
+  postId    String   @map("post_id")
+  url       String                        // Supabase Storage URL
+  order     Int                           // carousel position, 0-indexed
+  altText   String?  @map("alt_text")    // accessibility text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([postId])
+  @@map("post_media")
+}
+
+model PostTag {
+  id           String   @id @default(cuid())
+  postId       String   @map("post_id")
+  taggedUserId String   @map("tagged_user_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  post       Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  taggedUser User @relation("TaggedInPosts", fields: [taggedUserId], references: [id])
+
+  @@unique([postId, taggedUserId]) // same user cannot be tagged twice on the same post
+  @@index([taggedUserId])
+  @@map("post_tags")
+}
+
+model Like {
+  id        String   @id @default(cuid())
+  postId    String   @map("post_id")
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User @relation("UserLikes", fields: [userId], references: [id])
+
+  @@unique([postId, userId]) // one like per user per post, enforced at DB level
+  @@index([postId])
+  @@index([userId])
+  @@map("likes")
+}
+
+model Comment {
+  id         String        @id @default(cuid())
+  postId     String        @map("post_id")
+  authorId   String        @map("author_id")
+  parentId   String?       @map("parent_id")   // null = top-level, set = reply (max depth 1)
+  body       String
+  status     ContentStatus @default(PENDING_SCAN)
+  flagReason FlagReason?   @map("flag_reason") // null until moderation runs
+  flaggedAt  DateTime?     @map("flagged_at")  // null unless status = FLAGGED or REMOVED
+  deletedAt  DateTime?     @map("deleted_at")  // timestamp used by purge job for 30-day hard delete window
+  createdAt  DateTime      @default(now()) @map("created_at")
+  updatedAt  DateTime      @updatedAt @map("updated_at")
+
+  post    Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author  User      @relation("CommentAuthor", fields: [authorId], references: [id])
+  parent  Comment?  @relation("CommentReplies", fields: [parentId], references: [id])
+  replies Comment[] @relation("CommentReplies")
+
+  @@index([postId, status, deletedAt]) // fetch comments for a post
+  @@index([authorId, status])          // "my comments" query
+  @@map("comments")
 }
