@@ -1,71 +1,145 @@
 import os 
-import urllib.parse
-
-from utils.exceptions import AppException
-from models.schemas.app.auth import (
-    AppUserOut,
-    AppGoogleAuthUrlResponse,
-    AppAuthResponse,
+from utils.exceptions import AppException, GoogleLoginDomainDenied
+from models.schemas.auth import (
+    AuthResponse,
+    UserOut,
 )
+from utils.allowed_email import (
+    assert_copods_google_workspace,
+    is_allowed_signin_email,
+    normalize_email,
+)
+from utils.ban_check import raise_if_user_ban_active
 from services.auth_service import (
-    GOOGLE_AUTH_URL,
     GOOGLE_CLIENT_ID,
     _exchange_code_for_tokens,
     _get_google_user_info,
     _get_and_update_user,
     _create_jwt,
 )
+from db.client import db
+import httpx
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
 
-APP_GOOGLE_REDIRECT_URI = os.getenv("APP_GOOGLE_REDIRECT_URI")
 
+GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 
-def _build_google_auth_url(redirect_uri:str | None=None) -> str:
-    params = {
-        "client_id": GOOGLE_CLIENT_ID,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "access_type": "offline",
-        "prompt": "select_account",
-    }
-
-    return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
-
-async def get_app_google_auth_url() -> AppGoogleAuthUrlResponse:
-    if not APP_GOOGLE_REDIRECT_URI:
-        raise AppException(400, "APP_GOOGLE_REDIRECT_URI is not configured")
-    return AppGoogleAuthUrlResponse(
-        auth_url = _build_google_auth_url(APP_GOOGLE_REDIRECT_URI)
-    )
-
-async def handle_app_google_callback(code:str,platform:str) -> AppAuthResponse:
-    tokens = await _exchange_code_for_tokens(
-        code,
-        redirect_uri=APP_GOOGLE_REDIRECT_URI
-    )
-
-    access_token = tokens.get("access_token")
-    if not access_token:
-        raise AppException(400, "No access token received from Google")
-    
-    user_info = await _get_google_user_info(access_token)
-
-    user = await _get_and_update_user(user_info, platform)
-
-    token = _create_jwt(user, platform="app")
-
-    return AppAuthResponse(
-        token=token,
-        user=AppUserOut(
-            id=user.id,
-            email=user.email,
-            name=user.name,
-            picture=user.picture,
-            designation=user.designation,
-            dateOfJoining=user.dateOfJoining,
-            birthdate=user.birthdate,
-            role=str(user.role),
-            hasLoggedInApp=user.hasLoggedInApp,
+async def _verify_google_id_token(id_token: str) -> dict:
+    """Validate id_token with Google; returns claims (email, hd, aud, …)."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            GOOGLE_TOKENINFO_URL,
+            params={"id_token": id_token},
         )
+    if response.status_code != 200:
+        raise GoogleLoginDomainDenied()
+    claims = response.json()
+    aud = claims.get("aud") or claims.get("azp")
+    if aud != GOOGLE_CLIENT_ID:
+        raise GoogleLoginDomainDenied()
+    return claims
+
+
+def _enforce_copods_signin_policy(user_info: dict, id_token_claims: dict | None) -> str:
+    try:
+        return assert_copods_google_workspace(
+            userinfo=user_info,
+            id_token_claims=id_token_claims,
+        )
+    except ValueError:
+        raise GoogleLoginDomainDenied() from None
+
+
+
+
+async def verify_google_id_token_flow(token: str) -> dict:
+    """
+    Mobile login flow: validates Google idToken directly (no code exchange).
+    1. Verify idToken via google-auth library
+    2. Enforce @copods.co domain
+    3. Get or create user in DB
+    4. Issue JWT
+    """
+    try:
+        idinfo = google_id_token.verify_oauth2_token(
+            token,
+            google_requests.Request(),
+            GOOGLE_CLIENT_ID
+        )
+        email = normalize_email(idinfo.get("email"))
+
+        if not is_allowed_signin_email(email):
+            raise GoogleLoginDomainDenied()
+
+        user_info = {
+            "email": email,
+            "name": idinfo.get("name"),
+            "picture": idinfo.get("picture"),
+            "sub": idinfo.get("sub"),
+        }
+        user = await _get_or_create_user(user_info, email, platform="app")
+        jwt_token = _create_jwt(user, "app")
+        return {
+            "token": jwt_token,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "name": user.name,
+                "picture": user.picture,
+                "role": str(user.role)
+            }
+        }
+    except ValueError:
+        raise AppException(401, "Invalid Google token")
+
+# ── Mobile flow ───────────────────────────────────────────────────
+# Used by POST /auth/google/verify (idToken from mobile client)
+
+async def _get_or_create_user(user_info: dict, verified_email: str, platform: str):
+    """
+    Mobile login: fetch invited user by email and update profile/googleSub/login flag.
+    Never creates a new user.
+    """
+    google_sub = user_info.get("sub")
+    name = user_info.get("name")
+    picture = user_info.get("picture")
+
+    if not verified_email or not google_sub:
+        raise AppException(400, "Google account missing required information")
+
+    if not is_allowed_signin_email(verified_email):
+        raise GoogleLoginDomainDenied()
+
+    if platform != "app":
+        raise AppException(400, "Invalid platform. Must be 'app'")
+
+    existing_user = await db.user.find_unique(where={"email": verified_email})
+    if not existing_user:
+        raise AppException(403, "You have not been invited to this application")
+
+    if existing_user.deletedAt is not None:
+        raise AppException(403, "This account has been deleted. Please contact your administrator.")
+
+    if existing_user.isBanned:
+        raise_if_user_ban_active(existing_user)
+        await db.user.update(
+            where={"id": existing_user.id},
+            data={"isBanned": False, "bannedUntil": None, "banReason": None},
+        )
+
+    user = await db.user.update(
+        where={"email": verified_email},
+        data={
+            "googleSub": google_sub,
+            "name": name,
+            "picture": picture,
+            "hasLoggedInApp": True,
+            # do NOT force role here; keep invite-assigned role
+        },
     )
 
+    if not is_allowed_signin_email(user.email):
+        raise GoogleLoginDomainDenied()
+
+    return user

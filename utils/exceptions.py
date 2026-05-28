@@ -5,6 +5,12 @@ from fastapi.exceptions import RequestValidationError
 from prisma.errors import PrismaError
 
 
+class GoogleLoginDomainDenied(Exception):
+    """Email is outside ALLOWED_DOMAIN — OAuth callback returns redirect with error."""
+
+    pass
+
+
 class AppException(Exception):
     """Single custom exception for all intentional application errors."""
     def __init__(

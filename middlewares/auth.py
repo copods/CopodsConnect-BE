@@ -7,9 +7,10 @@ from jose import jwt, JWTError
 from db.client import db
 from utils.exceptions import AppException
 from utils.ban_check import raise_if_user_ban_active
+from utils.allowed_email import is_allowed_signin_email
 from constants import JWT_ALGORITHM
 from prisma.enums import Role
-
+from utils.allowed_email import is_allowed_signin_email
 security = HTTPBearer()
 
 
@@ -44,7 +45,7 @@ async def get_current_user(
 ):
     """
     Verifies JWT and returns the current user.
-    Also checks if the user is banned.
+    Also checks if the user is banned and if their email is still allowed.
 
     Use on any route that requires the user to be logged in.
     Does NOT check roles — that is the job of the role guards below.
@@ -75,11 +76,15 @@ async def get_current_user(
     if user.deletedAt is not None:
         raise AppException(401, "This account has been deleted")
 
-    # Ban check — same rules as OAuth login (utils.ban_check.raise_if_user_ban_active)
     if user.isBanned:
         raise_if_user_ban_active(user)
-        # Expired temporary ban — let through, clean up silently in background
         asyncio.create_task(_clear_expired_ban(user.id))
+
+    if not is_allowed_signin_email(user.email):
+        raise AppException(
+            403,
+            "Only @copods.co accounts may access this app.",
+        )
 
     return user
 
