@@ -14,24 +14,6 @@ CREATE TYPE "ContentStatus" AS ENUM ('PENDING_SCAN', 'PUBLISHED', 'FLAGGED', 'RE
 -- CreateEnum
 CREATE TYPE "FlagReason" AS ENUM ('NSFW_TEXT', 'NSFW_IMAGE', 'UNSAFE_LINK', 'NORMAL');
 
--- DropForeignKey
-ALTER TABLE "workspace_members" DROP CONSTRAINT "workspace_members_user_id_fkey";
-
--- DropForeignKey
-ALTER TABLE "workspace_members" DROP CONSTRAINT "workspace_members_workspace_id_fkey";
-
--- DropForeignKey
-ALTER TABLE "workspaces" DROP CONSTRAINT "workspaces_owner_id_fkey";
-
--- DropTable
-DROP TABLE "workspace_members";
-
--- DropTable
-DROP TABLE "workspaces";
-
--- DropEnum
-DROP TYPE "WorkspaceRole";
-
 -- CreateTable
 CREATE TABLE "posts" (
     "id" TEXT NOT NULL,

@@ -18,6 +18,8 @@ from routes import auth
 from routes import users
 from routes.app import auth as app_auth
 from routes.app.posts import posts_router
+from routes.alerts import alerts_router
+from routes.app.users import app_users_router
 from utils.exceptions import (
     AppException,
     app_exception_handler,
@@ -26,7 +28,8 @@ from utils.exceptions import (
     generic_exception_handler,
 )
 from utils.ApiResponse import api_response
-
+from routes.appreciation_types import appreciation_types_router
+from routes.app.appreciations import appreciations_router, appreciation_types_app_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -66,8 +69,11 @@ app.include_router(users.users_router, prefix=API_PREFIX)
 # --- App Routes ---
 app.include_router(app_auth.app_auth_router, prefix=API_PREFIX)
 app.include_router(posts_router, prefix=API_PREFIX)
-
-
+app.include_router(appreciation_types_router, prefix=API_PREFIX)
+app.include_router(appreciations_router, prefix=API_PREFIX)
+app.include_router(appreciation_types_app_router, prefix=API_PREFIX)
+app.include_router(alerts_router, prefix=API_PREFIX)
+app.include_router(app_users_router, prefix=API_PREFIX)
 
 # --- Health check ---
 @app.get("/health")

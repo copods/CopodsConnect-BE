@@ -8,7 +8,7 @@ from utils.exceptions import AppException, GoogleLoginDomainDenied
 from urllib.parse import urlencode
 from fastapi.responses import RedirectResponse
 import os
-from middlewares.auth import get_current_user
+from middlewares.auth import get_current_user, require_platform
 from services.user_service import serialize_user
 MOBILE_REDIRECT_URI = os.getenv("MOBILE_REDIRECT_URI")
 import services.auth_service as auth_service
@@ -63,6 +63,6 @@ async def verify_google_token(body: dict):
         raise AppException(403, "Only @copods.co Google accounts are allowed.")
 
 @app_auth_router.get("/me")
-async def me(current_user=Depends(get_current_user)):
-    """Returns the current user's information. Requires valid JWT."""
+async def me(current_user=Depends(require_platform("app"))):
+    """Returns the current user's information. Requires valid app JWT."""
     return api_response(200, serialize_user(current_user), "Current user information")

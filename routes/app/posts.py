@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, Query
+#routes/app/posts.py
+from fastapi import APIRouter, Depends, Query, BackgroundTasks
 from typing import Optional
 
-from middlewares.auth import get_current_user
+from middlewares.auth import get_current_user, require_platform
 from services.app import post_service
 from utils.ApiResponse import api_response
 from constants import DEFAULT_PAGE_SIZE
@@ -19,7 +20,7 @@ from models.schemas.app.posts import (
 posts_router = APIRouter(
     prefix="/app/posts",
     tags=["App Posts"],
-    dependencies=[Depends(get_current_user)],
+    dependencies=[Depends(require_platform("app"))],
 )
 
 
@@ -28,9 +29,10 @@ posts_router = APIRouter(
 @posts_router.post("")
 async def create_post(
     body: CreatePostRequest,
+    background_tasks: BackgroundTasks,
     current_user=Depends(get_current_user),
 ):
-    result = await post_service.create_post(current_user, body)
+    result = await post_service.create_post(current_user, body, background_tasks)
     return api_response(201, result, "Post created successfully")
 
 

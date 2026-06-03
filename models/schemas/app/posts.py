@@ -1,3 +1,4 @@
+#models/schemas/app/posts.py
 from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import datetime
@@ -33,6 +34,7 @@ class UpdatePostRequest(BaseModel):
 class CreateCommentRequest(BaseModel):
     body: str
     parentId: Optional[str] = None
+    taggedUserIds: list[str] = []
 
 
 class UpdateCommentRequest(BaseModel):
@@ -59,6 +61,13 @@ class TagOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+class CommentTagOut(BaseModel):
+    id: str
+    taggedUserId: str
+    taggedUserName: Optional[str] = None
+    taggedUserPicture: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 class AuthorOut(BaseModel):
     id: str
@@ -79,6 +88,7 @@ class CommentOut(BaseModel):
     updatedAt: datetime
     author: Optional[AuthorOut] = None
     replies: list["CommentOut"] = []
+    tags: list[CommentTagOut] = []
 
     model_config = ConfigDict(from_attributes=True)
 
