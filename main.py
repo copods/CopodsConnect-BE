@@ -1,6 +1,7 @@
 # main.py
+from typing import override
 from dotenv import load_dotenv
-load_dotenv()  # must be first — loads .env before anything else reads os.getenv()
+load_dotenv(override=True)  # must be first — loads .env before anything else reads os.getenv()
 
 import os
 from contextlib import asynccontextmanager
