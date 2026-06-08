@@ -11,8 +11,10 @@ from prisma.errors import PrismaError
 
 from db.client import db
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from zoneinfo import ZoneInfo
 from jobs.unban_job import clear_expired_bans
 from jobs.purge_soft_deleted_job import purge_soft_deleted_users
+from jobs.daily_celebration_job import create_daily_celebration_posts
 from constants import APP_NAME, API_PREFIX
 from routes import auth
 from routes import users
@@ -37,6 +39,14 @@ async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler()
     scheduler.add_job(clear_expired_bans, "interval", minutes=15, id="clear_expired_bans")
     scheduler.add_job(purge_soft_deleted_users, "interval", days=1, id="purge_soft_deleted_users")
+    scheduler.add_job(
+        create_daily_celebration_posts,
+        "cron",
+        hour=0,
+        minute=0,
+        timezone=ZoneInfo("Asia/Kolkata"),
+        id="daily_celebrations",
+    )
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)

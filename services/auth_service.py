@@ -1,6 +1,7 @@
 # services/auth_service.py
 import os
 import urllib.parse
+# pyrefly: ignore [missing-import]
 import httpx
 from datetime import datetime, timedelta, timezone
 from jose import jwt as jose_jwt
@@ -145,8 +146,13 @@ async def _get_and_update_user(user_info: dict, platform: str):
         user = await db.user.update(
             where={"email": email},
             data={
-                "name": name,
-                "picture": picture,
+                # Only fill name/picture from Google if the user has not set their own yet
+                **({
+                    "name": name,
+                } if existing_user.name is None else {}),
+                **({
+                    "picture": picture,
+                } if existing_user.picture is None else {}),
                 "googleSub": google_sub,
                 login_flag: True
             }

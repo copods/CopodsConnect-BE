@@ -132,8 +132,13 @@ async def _get_or_create_user(user_info: dict, verified_email: str, platform: st
         where={"email": verified_email},
         data={
             "googleSub": google_sub,
-            "name": name,
-            "picture": picture,
+            # Only fill name/picture from Google if the user has not set their own yet
+            **({
+                "name": name,
+            } if existing_user.name is None else {}),
+            **({
+                "picture": picture,
+            } if existing_user.picture is None else {}),
             "hasLoggedInApp": True,
             # do NOT force role here; keep invite-assigned role
         },
