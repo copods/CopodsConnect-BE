@@ -1,5 +1,5 @@
 # constants.py
-
+import os
 # App info
 APP_NAME = "CopodsConnect"
 API_VERSION = "v1"
@@ -16,3 +16,5 @@ ALLOWED_EMAIL_DOMAIN = "copods.co"
 # Moderation thresholds
 MODERATION_REVIEW_THRESHOLD = 0.5      # score >= this → FLAGGED, admin reviews
 MODERATION_AUTO_REMOVE_THRESHOLD = 1 # score >= this → REMOVED, no review needed
+
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")

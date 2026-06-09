@@ -1,3 +1,4 @@
+# models/schemas/app/appreciations.py
 from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import datetime
@@ -21,8 +22,7 @@ class UpdateAppreciationRequest(BaseModel):
 class AppreciationTypeMinimalOut(BaseModel):
     id: str
     name: str
-    emoji: str
-    animationUrl: Optional[str] = None
+    emojiUrl: str
     description: Optional[str] = None
     displayOrder: int
 
