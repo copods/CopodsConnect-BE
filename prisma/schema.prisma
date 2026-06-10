@@ -53,6 +53,7 @@ model User {
   receivedAppreciations AppreciationRecipient[] @relation("ReceivedAppreciations")
   reportedAlerts AdminAlert[] @relation("ReportedInAlerts")
   resolvedAlerts AdminAlert[] @relation("AlertsResolvedBy")
+  receivedNotifications Notification[] @relation("ReceivedNotifications")
 
   @@index([deletedAt])
   @@index([isBanned])
@@ -287,4 +288,94 @@ model AdminAlert {
   @@index([resolvedAction])
   @@index([reportedUserId])
   @@map("admin_alerts")
+}
+
+// ============================================================
+// NOTIFICATION MODELS
+// ============================================================
+
+enum NotificationType {
+  // Post surface — aggregated
+  POST_LIKE                  // many people like your post → groups into one notif
+  POST_COMMENT               // many people comment on your post → groups into one notif
+
+  // Post surface — individual
+  POST_TAG                   // someone tagged you in a post (fires after post is PUBLISHED)
+  COMMENT_REPLY              // someone replied to your comment
+  COMMENT_TAG                // someone tagged you in a comment
+
+  // Appreciation surface — individual
+  APPRECIATION_RECEIVED      // someone sent you an appreciation
+
+  // System — personal (sent only to the person whose day it is)
+  BIRTHDAY_CELEBRATION       // "Happy birthday from Copods!" — entityId = system post id
+  ANNIVERSARY_CELEBRATION    // "Happy N year anniversary!" — entityId = system post id
+
+  // System — broadcast (sent to all OTHER active users)
+  PEER_BIRTHDAY              // "Today is Karan's birthday!" — entityId = same system post id
+  PEER_ANNIVERSARY           // "Karan is celebrating N years!" — entityId = same system post id
+
+  // System — moderation
+  POST_REMOVED_BY_MODERATION // your post was removed by the moderation system
+
+  // System — scheduled digest broadcast
+  LEADERBOARD_DIGEST         // weekly/monthly prompt to check the leaderboard
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+
+  // Who receives this notification
+  recipientId String           @map("recipient_id")
+  recipient   User             @relation("ReceivedNotifications", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  type        NotificationType
+
+  // All actors who triggered this notification.
+  // For individual types (POST_TAG, COMMENT_REPLY, etc.): always one element.
+  // For aggregated types (POST_LIKE, POST_COMMENT): grows as more people act.
+  // For system types (BIRTHDAY_CELEBRATION, LEADERBOARD_DIGEST etc.): empty [].
+  // Never snapshotted — resolved to User records at read time.
+  // If a user is deleted (SetNull not applicable since no FK), their ID stays
+  // but the join returns null → display as "A Copods member".
+  actorIds    String[]         @default([]) @map("actor_ids")
+
+  // What entity this notification is about.
+  // entityType: "post" | "comment" | "appreciation" | null
+  // entityId:   cuid of that entity | null
+  // Used by the frontend for deep-link navigation on tap.
+  entityType  String?          @map("entity_type")
+  entityId    String?          @map("entity_id")
+
+  // Snapshot data for display — stored so the notification still renders
+  // even if the entity is later soft-deleted. Shape varies per type:
+  //
+  // POST_LIKE              → { postCaption: string | null }
+  // POST_COMMENT           → { postCaption: string | null }
+  // POST_TAG               → { postCaption: string | null }
+  // COMMENT_REPLY          → { commentSnippet: string, postId: string }
+  // COMMENT_TAG            → { commentSnippet: string, postId: string }
+  // APPRECIATION_RECEIVED  → { appreciationTypeName: string, emojiPath: string, message: string | null }
+  // BIRTHDAY_CELEBRATION   → { personName: string }
+  // ANNIVERSARY_CELEBRATION→ { personName: string, yearsAtCompany: int }
+  // PEER_BIRTHDAY          → { personName: string }
+  // PEER_ANNIVERSARY       → { personName: string, yearsAtCompany: int }
+  // POST_REMOVED_BY_MODERATION → { reason: string }
+  // LEADERBOARD_DIGEST     → { period: "weekly" | "monthly", weekOf: string }
+  metadata    Json?
+
+  isRead      Boolean          @default(false) @map("is_read")
+  readAt      DateTime?        @map("read_at")
+
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt      @map("updated_at")
+
+  // Primary fetch: all notifications for a user, unread first, newest first
+  @@index([recipientId, isRead, createdAt(sort: Desc)])
+  // Aggregation upsert lookup: find existing unread notif to append an actor to
+  @@index([recipientId, type, entityId, isRead])
+  // Cleanup / cascade reference: find all notifs tied to an entity
+  @@index([entityType, entityId])
+
+  @@map("notifications")
 }

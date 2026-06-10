@@ -7,6 +7,7 @@ import logging
 from datetime import datetime
 from db.client import db
 from zoneinfo import ZoneInfo
+from services.app import notification_service
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,9 @@ async def create_daily_celebration_posts() -> None:
         for user in birthday_users:
             user_id = user["id"]
             name = user["name"] or "a team member"
-            await db.post.create(
+
+            # Create the system post first — notifications reference its id
+            post = await db.post.create(
                 data={
                     "type": "SYSTEM_BIRTHDATE",
                     "caption": f"🎉 Happy Birthday, @{name}! Wishing you a fantastic day ahead! 🎂",
@@ -48,6 +51,29 @@ async def create_daily_celebration_posts() -> None:
                     },
                 }
             )
+
+            # Personal wish to the birthday person
+            await notification_service.notify_birthday_celebration(
+                birthday_user_id=user_id,
+                person_name=name,
+                post_id=post.id,
+            )
+
+            # Broadcast to all other active app users so they can wish/appreciate
+            peer_users = await db.user.find_many(
+                where={
+                    "deletedAt": None,
+                    "isBanned": False,
+                    "hasLoggedInApp": True,
+                    "id": {"not": user_id},
+                }
+            )
+            for peer in peer_users:
+                await notification_service.notify_peer_birthday(
+                    recipient_id=peer.id,
+                    person_name=name,
+                    post_id=post.id,
+                )
 
         # ── Work Anniversaries ─────────────────────────────────────────────────
         anniversary_users = await db.query_raw(
@@ -70,7 +96,9 @@ async def create_daily_celebration_posts() -> None:
             name = user["name"] or "a team member"
             join_year = user.get("join_year")
             years = int(current_year - join_year) if join_year else 1
-            await db.post.create(
+
+            # Create the system post first — notifications reference its id
+            post = await db.post.create(
                 data={
                     "type": "SYSTEM_ANNIVERSARY",
                     "caption": (
@@ -83,6 +111,31 @@ async def create_daily_celebration_posts() -> None:
                     },
                 }
             )
+
+            # Personal wish to the anniversary person
+            await notification_service.notify_anniversary_celebration(
+                anniversary_user_id=user_id,
+                person_name=name,
+                post_id=post.id,
+                years_at_company=years,
+            )
+
+            # Broadcast to all other active app users
+            peer_users = await db.user.find_many(
+                where={
+                    "deletedAt": None,
+                    "isBanned": False,
+                    "hasLoggedInApp": True,
+                    "id": {"not": user_id},
+                }
+            )
+            for peer in peer_users:
+                await notification_service.notify_peer_anniversary(
+                    recipient_id=peer.id,
+                    person_name=name,
+                    post_id=post.id,
+                    years_at_company=years,
+                )
 
     except Exception as e:
         logger.error("daily_celebration_job failed: %s", e)

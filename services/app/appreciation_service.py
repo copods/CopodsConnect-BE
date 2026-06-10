@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from db.client import db
 from utils.exceptions import AppException
 from constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, BASE_URL
+from services.app import notification_service
 from models.schemas.app.appreciations import (
     AppreciationOut,
     AppreciationListResponse,
@@ -130,6 +131,18 @@ async def create_appreciation(current_user, body) -> dict:
         },
         include=APPRECIATION_INCLUDE,
     )
+
+    # Notify each recipient — skipped internally if sender == recipient
+    for recipient_id in body.recipientIds:
+        await notification_service.notify_appreciation_received(
+            sender_id=current_user.id,
+            recipient_id=recipient_id,
+            appreciation_id=appreciation.id,
+            appreciation_type_name=appreciation_type.name,
+            emoji_path=appreciation_type.emojiPath,
+            message=body.message,
+        )
+
     return _serialize_appreciation(appreciation)
 
 

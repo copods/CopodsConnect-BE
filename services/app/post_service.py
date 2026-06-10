@@ -22,6 +22,7 @@ from services.app import storage_service
 from fastapi import BackgroundTasks
 from services.moderation_service import scan_text, scan_images
 from services.alert_service import create_alert
+from services.app import notification_service
 from constants import MODERATION_REVIEW_THRESHOLD, MODERATION_AUTO_REMOVE_THRESHOLD
 
 POST_INCLUDE = {
@@ -224,6 +225,13 @@ async def _scan_post(post_id: str, author_id: str, caption: str | None, media: l
             "reason": flag_reason.value if flag_reason else None,
         }, auto_removed=True)
 
+        # Notify the post author their post was removed by moderation
+        await notification_service.notify_post_removed_by_moderation(
+            post_id=post_id,
+            post_author_id=author_id,
+            flag_reason=flag_reason.value if flag_reason else "UNKNOWN",
+        )
+
     elif score >= MODERATION_REVIEW_THRESHOLD:
         await db.post.update(
             where={"id": post_id},
@@ -240,10 +248,25 @@ async def _scan_post(post_id: str, author_id: str, caption: str | None, media: l
         }, auto_removed=False)
 
     else:
-        await db.post.update(
+        post = await db.post.update(
             where={"id": post_id},
             data={"status": ContentStatus.PUBLISHED},
+            include={"tags": True},
         )
+
+        # Fire POST_TAG notifications now that the post is publicly visible.
+        # Only for USER_POST — system posts (birthday, anniversary) handle
+        # their own notifications in daily_celebration_job.
+        # # pyrefly: ignore [missing-import]
+        # from prisma.enums import PostType
+        if post.type == PostType.USER_POST and post.tags:
+            for tag in post.tags:
+                await notification_service.notify_post_tagged(
+                    tagger_id=author_id,
+                    tagged_user_id=tag.taggedUserId,
+                    post_id=post_id,
+                    post_caption=post.caption,
+                )
 
 async def get_feed(
     current_user,
@@ -360,6 +383,16 @@ async def like_post(current_user, post_id: str) -> dict:
 
     await db.like.create(data={"postId": post_id, "userId": current_user.id})
     count = await db.like.count(where={"postId": post_id})
+
+    # Notify post author — skipped internally if liker == author
+    if post.authorId:
+        await notification_service.notify_post_liked(
+            liker_id=current_user.id,
+            post_id=post_id,
+            post_author_id=post.authorId,
+            post_caption=post.caption,
+        )
+
     return LikeResponse(postId=post_id, liked=True, likeCount=count).model_dump(mode="json")
 
 
@@ -377,6 +410,15 @@ async def unlike_post(current_user, post_id: str) -> dict:
 
     await db.like.delete(where={"id": existing.id})
     count = await db.like.count(where={"postId": post_id})
+
+    # Roll back unread POST_LIKE notification if author hasn't seen it yet
+    if post.authorId:
+        await notification_service.notify_post_unliked(
+            unliker_id=current_user.id,
+            post_id=post_id,
+            post_author_id=post.authorId,
+        )
+
     return LikeResponse(postId=post_id, liked=False, likeCount=count).model_dump(mode="json")
 
 
@@ -478,6 +520,46 @@ async def create_comment(current_user, post_id: str, body) -> dict:
             },
             include=COMMENT_INCLUDE,
         )
+
+        if parent_id:
+            # This is a reply — notify the parent comment author.
+            # We need the parent comment author id. Fetch it since we
+            # already validated the parent exists above.
+            parent_comment = await db.comment.find_unique(where={"id": parent_id})
+            if parent_comment:
+                await notification_service.notify_comment_replied(
+                    replier_id=current_user.id,
+                    parent_comment_id=parent_id,
+                    parent_comment_author_id=parent_comment.authorId,
+                    post_id=post_id,
+                    comment_snippet=body.body,
+                )
+                # Do NOT fire notify_post_commented here even if the parent
+                # comment author is also the post author — COMMENT_REPLY
+                # takes precedence. The post author is not notified of replies
+                # to comments on their post (same behaviour as Instagram/LinkedIn).
+        else:
+            # Top-level comment — notify the post author.
+            # Skipped internally if commenter == post author.
+            if post.authorId:
+                await notification_service.notify_post_commented(
+                    commenter_id=current_user.id,
+                    post_id=post_id,
+                    post_author_id=post.authorId,
+                    post_caption=post.caption,
+                )
+
+        # Notify tagged users in the comment — skipped internally per user
+        # if tagger == tagged user.
+        for uid in valid_tagged_ids:
+            await notification_service.notify_comment_tagged(
+                tagger_id=current_user.id,
+                tagged_user_id=uid,
+                comment_id=comment.id,
+                post_id=post_id,
+                comment_snippet=body.body,
+            )
+
         return _serialize_comment(comment).model_dump(mode="json")
 
 
