@@ -76,7 +76,7 @@ ALERT_INCLUDE = {
 @alerts_router.get("")
 async def list_alerts(
     resolved: Optional[bool] = Query(default=None),
-    auto_removed: Optional[bool] = Query(default=None, alias="autoRemoved"),
+    # auto_removed: Optional[bool] = Query(default=None, alias="autoRemoved"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100, alias="pageSize"),
     current_user=Depends(require_admin),
@@ -85,15 +85,15 @@ async def list_alerts(
     List alerts.
     - No filters            → all alerts
     - resolved=false        → needs review (resolvedAction IS NULL)
-    - autoRemoved=true      → auto-removed log
+    # - autoRemoved=true      → auto-removed log
     - resolved=true         → admin-resolved (RESTORED or CONFIRMED_REMOVAL)
     """
     where: dict = {}
 
     if resolved is False:
         where["resolvedAction"] = None
-    elif auto_removed is True:
-        where["resolvedAction"] = AlertAction.AUTO_REMOVED
+    # elif auto_removed is True:
+    #     where["resolvedAction"] = AlertAction.AUTO_REMOVED
     elif resolved is True:
         where["resolvedAction"] = {"in": [AlertAction.RESTORED, AlertAction.CONFIRMED_REMOVAL]}
 

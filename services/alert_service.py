@@ -1,4 +1,5 @@
 # services/alert_service.py
+from services.app import notification_service
 import json
 from datetime import datetime, timezone
 
@@ -11,12 +12,10 @@ async def create_alert(
     post_id: str,
     author_id: str,
     flag_details: dict,
-    auto_removed: bool,
 ) -> None:
     """
     Creates an AdminAlert record and emails all admins.
-    - auto_removed=True  → resolvedAction = AUTO_REMOVED (no admin review needed)
-    - auto_removed=False → resolvedAction = None (pending admin review)
+    - Always creates as pending admin review (resolvedAction = None)
     """
     now = datetime.now(timezone.utc)
 
@@ -25,8 +24,8 @@ async def create_alert(
             "postId": post_id,
             "reportedUserId": author_id,
             "flagDetails": json.dumps(flag_details),
-            "resolvedAction": AlertAction.AUTO_REMOVED if auto_removed else None,
-            "resolvedAt": now if auto_removed else None,
+            "resolvedAction": None,
+"resolvedAt": None,
         }
     )
 
@@ -48,7 +47,6 @@ async def create_alert(
             flagged_user_name=flagged_user.name or "Unknown",
             flagged_user_email=flagged_user.email,
             post_id=post_id,
-            auto_removed=auto_removed,
         )
 
 
@@ -76,7 +74,14 @@ async def resolve_alert(alert_id: str, action: AlertAction, resolved_by_id: str)
             "resolvedById": resolved_by_id,
         },
     )
-    await db.post.update(
+    updated_post = await db.post.update(
         where={"id": alert.postId},
         data={"status": new_post_status},
     )
+    # Notify the author when admin removes their post
+    if action == AlertAction.CONFIRMED_REMOVAL and updated_post:
+        await notification_service.notify_post_removed_by_moderation(
+            post_id=alert.postId,
+            post_author_id=alert.reportedUserId,
+            flag_reason=updated_post.flagReason.value if updated_post.flagReason else "UNKNOWN"
+        )

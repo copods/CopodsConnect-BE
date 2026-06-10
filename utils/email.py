@@ -169,33 +169,33 @@ The CopodsConnect Team
     except Exception:
         return False
 
-async def send_nsfw_alert_email(to_email: str, flagged_user_name: str, flagged_user_email: str, post_id: str, auto_removed: bool) -> bool:
+async def send_nsfw_alert_email(to_email: str, flagged_user_name: str, flagged_user_email: str, post_id: str) -> bool:
     """Sends alert email to an admin when a post is flagged for NSFW content."""
-    return await asyncio.to_thread(_send_nsfw_alert_email_sync, to_email, flagged_user_name, flagged_user_email, post_id, auto_removed)
+    return await asyncio.to_thread(_send_nsfw_alert_email_sync, to_email, flagged_user_name, flagged_user_email, post_id)
 
 
-def _send_nsfw_alert_email_sync(to_email: str, flagged_user_name: str, flagged_user_email: str, post_id: str, auto_removed: bool) -> bool:
+def _send_nsfw_alert_email_sync(to_email: str, flagged_user_name: str, flagged_user_email: str, post_id: str) -> bool:
     try:
         gmail_user = os.getenv("GMAIL_USER")
         gmail_password = os.getenv("GMAIL_APP_PASSWORD")
 
-        action = "automatically removed" if auto_removed else "flagged for your review"
+        
 
         msg = MIMEMultipart()
         msg['From'] = gmail_user
         msg['To'] = to_email
-        msg['Subject'] = f"[CopodsConnect] NSFW Content {'Auto-Removed' if auto_removed else 'Flagged for Review'}"
+        msg['Subject'] = f"[CopodsConnect] NSFW Content Flagged for Review"
 
         body = f"""
 Hi Admin,
 
-A post on CopodsConnect has been {action} by the moderation system.
+A post on CopodsConnect has been flagged for NSFW content by the moderation system.
 
 User: {flagged_user_name} ({flagged_user_email})
 Post ID: {post_id}
-Action taken: {"Automatically removed (high confidence)" if auto_removed else "Flagged — requires your review"}
+Action taken: Flagged — requires your review
 
-{"No action is required from you. This is for your records." if auto_removed else "Please log in to the admin panel to review this post and take action."}
+Please log in to the admin panel to review this post and take action.
 
 Regards,
 CopodsConnect Moderation System

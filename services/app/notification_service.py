@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from db.client import db
 from prisma.enums import NotificationType
+from prisma import Json
 from utils.exceptions import AppException
 from models.schemas.app.notifications import (
     NotificationOut,
@@ -128,7 +129,7 @@ async def _create_notification(
             "actorIds": [actor_id] if actor_id else [],
             "entityType": entity_type,
             "entityId": entity_id,
-            "metadata": metadata,
+            "metadata": Json(metadata) if metadata is not None else None,
         }
     )
     # TODO: call _send_push_notification() here when push is implemented
@@ -182,7 +183,7 @@ async def _upsert_aggregated_notification(
                 "actorIds": [actor_id],
                 "entityType": entity_type,
                 "entityId": entity_id,
-                "metadata": metadata,
+                "metadata": Json(metadata) if metadata is not None else None,
             }
         )
     # TODO: call _send_push_notification() here when push is implemented
@@ -617,4 +618,4 @@ async def mark_all_notifications_read(
         where=where,
         data={"isRead": True, "readAt": now},
     )
-    return MarkAllReadResponse(updatedCount=result.count).model_dump(mode="json")
+    return MarkAllReadResponse(updatedCount=result).model_dump(mode="json")

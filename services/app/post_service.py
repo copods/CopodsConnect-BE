@@ -23,7 +23,7 @@ from fastapi import BackgroundTasks
 from services.moderation_service import scan_text, scan_images
 from services.alert_service import create_alert
 from services.app import notification_service
-from constants import MODERATION_REVIEW_THRESHOLD, MODERATION_AUTO_REMOVE_THRESHOLD
+from constants import MODERATION_REVIEW_THRESHOLD
 
 POST_INCLUDE = {
     "author": True,
@@ -210,29 +210,7 @@ async def _scan_post(post_id: str, author_id: str, caption: str | None, media: l
         FlagReason.NSFW_IMAGE if image_score >= text_score else FlagReason.NSFW_TEXT
     ) if score >= MODERATION_REVIEW_THRESHOLD else None
 
-    if score >= MODERATION_AUTO_REMOVE_THRESHOLD:
-        await db.post.update(
-            where={"id": post_id},
-            data={
-                "status": ContentStatus.REMOVED,
-                "flagReason": flag_reason,
-                "flaggedAt": now,
-            },
-        )
-        await create_alert(post_id=post_id, author_id=author_id, flag_details={
-            "text_score": text_score,
-            "image_score": image_score,
-            "reason": flag_reason.value if flag_reason else None,
-        }, auto_removed=True)
-
-        # Notify the post author their post was removed by moderation
-        await notification_service.notify_post_removed_by_moderation(
-            post_id=post_id,
-            post_author_id=author_id,
-            flag_reason=flag_reason.value if flag_reason else "UNKNOWN",
-        )
-
-    elif score >= MODERATION_REVIEW_THRESHOLD:
+    if score >= MODERATION_REVIEW_THRESHOLD:
         await db.post.update(
             where={"id": post_id},
             data={
@@ -245,7 +223,7 @@ async def _scan_post(post_id: str, author_id: str, caption: str | None, media: l
             "text_score": text_score,
             "image_score": image_score,
             "reason": flag_reason.value if flag_reason else None,
-        }, auto_removed=False)
+        })
 
     else:
         post = await db.post.update(
@@ -468,27 +446,7 @@ async def create_comment(current_user, post_id: str, body) -> dict:
 
     tag_create = [{"taggedUserId": uid} for uid in valid_tagged_ids]
 
-    if text_score >= MODERATION_AUTO_REMOVE_THRESHOLD:
-        await db.comment.create(
-            data={
-                "postId": post_id,
-                "authorId": current_user.id,
-                "body": body.body,
-                "parentId": parent_id,
-                "status": ContentStatus.REMOVED,
-                "flagReason": FlagReason.NSFW_TEXT,
-                "flaggedAt": now,
-                **({"tags": {"create": tag_create}} if tag_create else {}),
-            },
-            include=COMMENT_INCLUDE,
-        )
-        await create_alert(post_id=post_id, author_id=current_user.id, flag_details={
-            "text_score": text_score,
-            "reason": FlagReason.NSFW_TEXT.value,
-        }, auto_removed=True)
-        raise AppException(400, "Your comment was flagged for inappropriate content")
-
-    elif text_score >= MODERATION_REVIEW_THRESHOLD:
+    if text_score >= MODERATION_REVIEW_THRESHOLD:
         await db.comment.create(
             data={
                 "postId": post_id,
@@ -505,7 +463,7 @@ async def create_comment(current_user, post_id: str, body) -> dict:
         await create_alert(post_id=post_id, author_id=current_user.id, flag_details={
             "text_score": text_score,
             "reason": FlagReason.NSFW_TEXT.value,
-        }, auto_removed=False)
+        })
         raise AppException(400, "Your comment was flagged for inappropriate content")
 
     else:
