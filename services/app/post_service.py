@@ -31,12 +31,12 @@ POST_INCLUDE = {
     "tags": {"include": {"taggedUser": True}},
     "likes": True,
     "comments": {
-        "where": {"deletedAt": None, "parentId": None, "status": {"not": ContentStatus.REMOVED}},
+        "where": {"deletedAt": None, "parentId": None, "status": {"equals": ContentStatus.PUBLISHED}},
         "include": {
             "author": True,
             "tags": {"include": {"taggedUser": True}},
             "replies": {
-                "where": {"deletedAt": None, "status": {"not": ContentStatus.REMOVED}},
+                "where": {"deletedAt": None, "status": {"equals": ContentStatus.PUBLISHED}},
                 "include": {
                     "author": True,
                     "tags": {"include": {"taggedUser": True}},
@@ -58,7 +58,7 @@ FEED_INCLUDE = {
 
 COMMENT_COUNT_WHERE = {
     "deletedAt": None,
-    "status": {"not": ContentStatus.REMOVED},
+    "status": {"equals": ContentStatus.PUBLISHED},
 }
 
 # ── Serializers ───────────────────────────────────────────────
@@ -447,7 +447,7 @@ async def create_comment(current_user, post_id: str, body) -> dict:
     tag_create = [{"taggedUserId": uid} for uid in valid_tagged_ids]
 
     if text_score >= MODERATION_REVIEW_THRESHOLD:
-        await db.comment.create(
+        comment = await db.comment.create(
             data={
                 "postId": post_id,
                 "authorId": current_user.id,
@@ -464,8 +464,7 @@ async def create_comment(current_user, post_id: str, body) -> dict:
             "text_score": text_score,
             "reason": FlagReason.NSFW_TEXT.value,
         })
-        raise AppException(400, "Your comment was flagged for inappropriate content")
-
+        return _serialize_comment(comment).model_dump(mode="json")
     else:
         comment = await db.comment.create(
             data={
