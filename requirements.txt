@@ -21,3 +21,4 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 uvicorn==0.44.0
 supabase>=2.10.0
+openai>=1.67.0

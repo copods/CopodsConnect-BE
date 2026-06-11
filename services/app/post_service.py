@@ -10,6 +10,7 @@ from models.schemas.app.posts import (
     PostDetailOut,
     MediaOut,
     TagOut,
+    CommentTagOut,
     AuthorOut,
     CommentOut,
     FeedResponse,
@@ -18,6 +19,10 @@ from models.schemas.app.posts import (
     DeleteCommentResponse,
 )
 from services.app import storage_service
+from fastapi import BackgroundTasks
+from services.moderation_service import scan_text, scan_images
+from services.alert_service import create_alert
+from constants import MODERATION_REVIEW_THRESHOLD, MODERATION_AUTO_REMOVE_THRESHOLD
 
 POST_INCLUDE = {
     "author": True,
@@ -28,9 +33,13 @@ POST_INCLUDE = {
         "where": {"deletedAt": None, "parentId": None, "status": {"not": ContentStatus.REMOVED}},
         "include": {
             "author": True,
+            "tags": {"include": {"taggedUser": True}},
             "replies": {
                 "where": {"deletedAt": None, "status": {"not": ContentStatus.REMOVED}},
-                "include": {"author": True},
+                "include": {
+                    "author": True,
+                    "tags": {"include": {"taggedUser": True}},
+                },
                 "order_by": {"createdAt": "asc"},
             },
         },
@@ -73,9 +82,18 @@ def _serialize_tag(tag) -> TagOut:
         taggedUserPicture=user.picture if user else None,
     )
 
+def _serialize_comment_tag(tag) -> CommentTagOut:
+    user = getattr(tag, "taggedUser", None)
+    return CommentTagOut(
+        id=tag.id,
+        taggedUserId=tag.taggedUserId,
+        taggedUserName=user.name if user else None,
+        taggedUserPicture=user.picture if user else None,
+    )
 
 def _serialize_comment(comment) -> CommentOut:
     replies = getattr(comment, "replies", []) or []
+    tags = getattr(comment, "tags", []) or []
     return CommentOut(
         id=comment.id,
         body=comment.body,
@@ -86,6 +104,7 @@ def _serialize_comment(comment) -> CommentOut:
         updatedAt=comment.updatedAt,
         author=_serialize_author(getattr(comment, "author", None)),
         replies=[_serialize_comment(r) for r in replies],
+        tags=[_serialize_comment_tag(t) for t in tags],
     )
 
 
@@ -134,14 +153,14 @@ def _serialize_post(
 
 # ── CRUD: Posts ───────────────────────────────────────────────
 
-async def create_post(current_user, body) -> dict:
+async def create_post(current_user, body, background_tasks: BackgroundTasks) -> dict:
     for m in body.media:
         storage_service.assert_allowed_post_media_url(m.url)
 
     create_data: dict = {
         "caption": body.caption,
         "type": body.type,
-        "status": ContentStatus.PUBLISHED,
+        "status": ContentStatus.PENDING_SCAN,
         "author": {"connect": {"id": current_user.id}},
     }
 
@@ -163,8 +182,68 @@ async def create_post(current_user, body) -> dict:
         include=FEED_INCLUDE,
     )
 
+    background_tasks.add_task(_scan_post, post.id, current_user.id, body.caption, body.media)
+
     return _serialize_post(post, current_user.id, include_comments=False)
 
+async def _scan_post(post_id: str, author_id: str, caption: str | None, media: list) -> None:
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
+    try:
+        text_score, text_reason = await scan_text(caption) if caption else (0.0, None)
+        image_urls = [m.url for m in media] if media else []
+        image_score, image_reason = await scan_images(image_urls) if image_urls else (0.0, None)
+    except Exception as e:
+        # If moderation API fails for any reason, publish the post so it
+        # doesn't get stuck in PENDING_SCAN forever. Log for visibility.
+        print(f"[moderation] scan failed for post {post_id}: {e}")
+        await db.post.update(
+            where={"id": post_id},
+            data={"status": ContentStatus.PUBLISHED},
+        )
+        return
+
+    score = max(text_score, image_score)
+    flag_reason = (
+        FlagReason.NSFW_IMAGE if image_score >= text_score else FlagReason.NSFW_TEXT
+    ) if score >= MODERATION_REVIEW_THRESHOLD else None
+
+    if score >= MODERATION_AUTO_REMOVE_THRESHOLD:
+        await db.post.update(
+            where={"id": post_id},
+            data={
+                "status": ContentStatus.REMOVED,
+                "flagReason": flag_reason,
+                "flaggedAt": now,
+            },
+        )
+        await create_alert(post_id=post_id, author_id=author_id, flag_details={
+            "text_score": text_score,
+            "image_score": image_score,
+            "reason": flag_reason.value if flag_reason else None,
+        }, auto_removed=True)
+
+    elif score >= MODERATION_REVIEW_THRESHOLD:
+        await db.post.update(
+            where={"id": post_id},
+            data={
+                "status": ContentStatus.FLAGGED,
+                "flagReason": flag_reason,
+                "flaggedAt": now,
+            },
+        )
+        await create_alert(post_id=post_id, author_id=author_id, flag_details={
+            "text_score": text_score,
+            "image_score": image_score,
+            "reason": flag_reason.value if flag_reason else None,
+        }, auto_removed=False)
+
+    else:
+        await db.post.update(
+            where={"id": post_id},
+            data={"status": ContentStatus.PUBLISHED},
+        )
 
 async def get_feed(
     current_user,
@@ -314,25 +393,92 @@ async def create_comment(current_user, post_id: str, body) -> dict:
         parent = await db.comment.find_unique(where={"id": body.parentId})
         if not parent or parent.postId != post_id or parent.deletedAt is not None:
             raise AppException(404, "Parent comment not found")
-        # if replying to a reply, re-point to the top-level comment
-        if parent.parentId is not None:
-            parent_id = parent.parentId
-        else:
-            parent_id = body.parentId
+        parent_id = parent.parentId if parent.parentId is not None else body.parentId
     else:
         parent_id = None
 
-    comment = await db.comment.create(
-        data={
-            "postId": post_id,
-            "authorId": current_user.id,
-            "body": body.body,
-            "parentId": parent_id,
-            "status": ContentStatus.PUBLISHED,
+    # Validate tagged user IDs exist
+    if body.taggedUserIds:
+        tagged_users = await db.user.find_many(
+            where={
+                "id": {"in": body.taggedUserIds},
+                "deletedAt": None,
+                "hasLoggedInApp": True,
+            }
+        )
+        valid_tagged_ids = [u.id for u in tagged_users]
+    else:
+        valid_tagged_ids = []
+
+    COMMENT_INCLUDE = {
+        "author": True,
+        "tags": {"include": {"taggedUser": True}},
+        "replies": {
+            "include": {
+                "author": True,
+                "tags": {"include": {"taggedUser": True}},
+            }
         },
-        include={"author": True, "replies": {"include": {"author": True}}},
-    )
-    return _serialize_comment(comment).model_dump(mode="json")
+    }
+
+    now = datetime.now(timezone.utc)
+    text_score, text_reason = await scan_text(body.body)
+
+    tag_create = [{"taggedUserId": uid} for uid in valid_tagged_ids]
+
+    if text_score >= MODERATION_AUTO_REMOVE_THRESHOLD:
+        await db.comment.create(
+            data={
+                "postId": post_id,
+                "authorId": current_user.id,
+                "body": body.body,
+                "parentId": parent_id,
+                "status": ContentStatus.REMOVED,
+                "flagReason": FlagReason.NSFW_TEXT,
+                "flaggedAt": now,
+                **({"tags": {"create": tag_create}} if tag_create else {}),
+            },
+            include=COMMENT_INCLUDE,
+        )
+        await create_alert(post_id=post_id, author_id=current_user.id, flag_details={
+            "text_score": text_score,
+            "reason": FlagReason.NSFW_TEXT.value,
+        }, auto_removed=True)
+        raise AppException(400, "Your comment was flagged for inappropriate content")
+
+    elif text_score >= MODERATION_REVIEW_THRESHOLD:
+        await db.comment.create(
+            data={
+                "postId": post_id,
+                "authorId": current_user.id,
+                "body": body.body,
+                "parentId": parent_id,
+                "status": ContentStatus.FLAGGED,
+                "flagReason": FlagReason.NSFW_TEXT,
+                "flaggedAt": now,
+                **({"tags": {"create": tag_create}} if tag_create else {}),
+            },
+            include=COMMENT_INCLUDE,
+        )
+        await create_alert(post_id=post_id, author_id=current_user.id, flag_details={
+            "text_score": text_score,
+            "reason": FlagReason.NSFW_TEXT.value,
+        }, auto_removed=False)
+        raise AppException(400, "Your comment was flagged for inappropriate content")
+
+    else:
+        comment = await db.comment.create(
+            data={
+                "postId": post_id,
+                "authorId": current_user.id,
+                "body": body.body,
+                "parentId": parent_id,
+                "status": ContentStatus.PUBLISHED,
+                **({"tags": {"create": tag_create}} if tag_create else {}),
+            },
+            include=COMMENT_INCLUDE,
+        )
+        return _serialize_comment(comment).model_dump(mode="json")
 
 
 async def update_comment(current_user, comment_id: str, body) -> dict:
@@ -347,7 +493,16 @@ async def update_comment(current_user, comment_id: str, body) -> dict:
     updated = await db.comment.update(
         where={"id": comment_id},
         data={"body": body.body},
-        include={"author": True, "replies": {"include": {"author": True}}},
+        include={
+            "author": True,
+            "tags": {"include": {"taggedUser": True}},
+            "replies": {
+                "include": {
+                    "author": True,
+                    "tags": {"include": {"taggedUser": True}},
+                }
+            },
+        },
     )
     return _serialize_comment(updated).model_dump(mode="json")
 

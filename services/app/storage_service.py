@@ -100,6 +100,43 @@ async def create_post_media_upload_url(user_id: str, content_type: str) -> dict:
     return payload
 
 
+def _create_avatar_upload_sync(user_id: str, content_type: str) -> dict:
+    ext = _extension_for_content_type(content_type)
+    safe_user_id = _sanitize_user_id(user_id)
+    path = f"avatars/{safe_user_id}/{uuid4()}.{ext}"
+    bucket = _get_bucket()
+
+    supabase = _get_supabase()
+    result = supabase.storage.from_(bucket).create_signed_upload_url(
+        path,
+        options=CreateSignedUploadUrlOptions(upsert="true"),
+    )
+
+    if isinstance(result, dict):
+        signed = result.get("signedUrl") or result.get("signed_url")
+        storage_path = result.get("path") or path
+    else:
+        signed = getattr(result, "signedUrl", None) or getattr(result, "signed_url", None)
+        storage_path = getattr(result, "path", path)
+
+    if not signed:
+        raise AppException(500, "Failed to create signed upload URL from Supabase.")
+
+    return {
+        "uploadUrl": signed,
+        "publicUrl": _public_url(storage_path),
+        "path": storage_path,
+        "contentType": content_type,
+    }
+
+
+async def create_avatar_upload_url(user_id: str, content_type: str) -> dict:
+    """Generate a signed Supabase upload URL for a profile picture.
+    Files are stored under avatars/{user_id}/ to separate them from post media.
+    """
+    return await asyncio.to_thread(_create_avatar_upload_sync, user_id, content_type)
+
+
 def assert_allowed_post_media_url(url: str) -> None:
     """Optional: call from create_post to reject non-Supabase URLs."""
     base = os.getenv("SUPABASE_URL", "").strip().rstrip("/")

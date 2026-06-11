@@ -1,3 +1,4 @@
+//prisma schema.prisma 
 datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
@@ -45,8 +46,13 @@ model User {
   // Relations — not DB columns, Prisma navigation only 
   authoredPosts Post[]    @relation("PostAuthor")
   taggedInPosts PostTag[] @relation("TaggedInPosts")
+  taggedInComments CommentTag[] @relation("TaggedInComments")
   likes         Like[]    @relation("UserLikes")
   comments      Comment[] @relation("CommentAuthor")
+  sentAppreciations     Appreciation[]          @relation("SentAppreciations")
+  receivedAppreciations AppreciationRecipient[] @relation("ReceivedAppreciations")
+  reportedAlerts AdminAlert[] @relation("ReportedInAlerts")
+  resolvedAlerts AdminAlert[] @relation("AlertsResolvedBy")
 
   @@index([deletedAt])
   @@index([isBanned])
@@ -111,6 +117,7 @@ model Post {
   tags     PostTag[]
   likes    Like[]
   comments Comment[]
+  alerts AdminAlert[]
 
   @@index([status, deletedAt, createdAt(sort: Desc)]) // primary feed query index
   @@index([authorId, status, deletedAt])              // "my posts" query
@@ -178,8 +185,107 @@ model Comment {
   author  User      @relation("CommentAuthor", fields: [authorId], references: [id])
   parent  Comment?  @relation("CommentReplies", fields: [parentId], references: [id])
   replies Comment[] @relation("CommentReplies")
+  tags CommentTag[]
 
   @@index([postId, status, deletedAt]) // fetch comments for a post
   @@index([authorId, status])          // "my comments" query
   @@map("comments")
+}
+
+model CommentTag {
+  id           String   @id @default(cuid())
+  commentId    String   @map("comment_id")
+  taggedUserId String   @map("tagged_user_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  comment    Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  taggedUser User    @relation("TaggedInComments", fields: [taggedUserId], references: [id])
+
+  @@unique([commentId, taggedUserId]) // same user cannot be tagged twice in the same comment
+  @@index([taggedUserId])
+  @@map("comment_tags")
+}
+
+// ============================================================
+// APPRECIATION MODELS
+// ============================================================
+
+model AppreciationType {
+  id           String   @id @default(cuid())
+  name         String
+  emoji        String
+  animationUrl String?  @map("animation_url")
+  description  String?
+  isActive     Boolean  @default(true) @map("is_active")
+  displayOrder Int      @default(0)    @map("display_order")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt      @map("updated_at")
+
+  appreciations Appreciation[]
+
+  @@map("appreciation_types")
+}
+
+model Appreciation {
+  id                 String    @id @default(cuid())
+  senderId           String    @map("sender_id")
+  appreciationTypeId String    @map("appreciation_type_id")
+  message            String?
+  deletedAt          DateTime? @map("deleted_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt      @map("updated_at")
+
+  sender           User                    @relation("SentAppreciations", fields: [senderId], references: [id])
+  appreciationType AppreciationType        @relation(fields: [appreciationTypeId], references: [id])
+  recipients       AppreciationRecipient[]
+
+  @@index([senderId])
+  @@index([deletedAt])
+  @@map("appreciations")
+}
+
+model AppreciationRecipient {
+  id             String    @id @default(cuid())
+  appreciationId String    @map("appreciation_id")
+  userId         String    @map("user_id")
+  seenAt         DateTime? @map("seen_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  appreciation Appreciation @relation(fields: [appreciationId], references: [id])
+  user         User         @relation("ReceivedAppreciations", fields: [userId], references: [id])
+
+  @@unique([appreciationId, userId])
+  @@index([userId])
+  @@map("appreciation_recipients")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+enum AlertAction {
+  RESTORED           // admin restored post to PUBLISHED
+  CONFIRMED_REMOVAL  // admin confirmed post stays REMOVED
+  AUTO_REMOVED       // system removed at high confidence, no admin action needed
+}
+
+// ============================================================
+// ALERT MODELS
+// ============================================================
+model AdminAlert {
+  id             String       @id @default(cuid())
+  postId         String       @map("post_id")
+  reportedUserId String       @map("reported_user_id")
+  flagDetails    String?      @map("flag_details")   // JSON: raw API scores + categories
+  resolvedAt     DateTime?    @map("resolved_at")
+  resolvedById   String?      @map("resolved_by_id")
+  resolvedAction AlertAction? @map("resolved_action") // null = pending admin review
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  post         Post  @relation(fields: [postId], references: [id])
+  reportedUser User  @relation("ReportedInAlerts", fields: [reportedUserId], references: [id])
+  resolvedBy   User? @relation("AlertsResolvedBy", fields: [resolvedById], references: [id])
+
+  @@index([resolvedAction])
+  @@index([reportedUserId])
+  @@map("admin_alerts")
 }
