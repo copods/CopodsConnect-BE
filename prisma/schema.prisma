@@ -187,6 +187,7 @@ model Comment {
   parent  Comment?  @relation("CommentReplies", fields: [parentId], references: [id])
   replies Comment[] @relation("CommentReplies")
   tags CommentTag[]
+  alerts  AdminAlert[]
 
   @@index([postId, status, deletedAt]) // fetch comments for a post
   @@index([authorId, status])          // "my comments" query
@@ -274,6 +275,7 @@ enum AlertAction {
 model AdminAlert {
   id             String       @id @default(cuid())
   postId         String       @map("post_id")
+  commentId      String?      @map("comment_id")
   reportedUserId String       @map("reported_user_id")
   flagDetails    String?      @map("flag_details")   // JSON: raw API scores + categories
   resolvedAt     DateTime?    @map("resolved_at")
@@ -282,6 +284,7 @@ model AdminAlert {
   createdAt      DateTime     @default(now()) @map("created_at")
 
   post         Post  @relation(fields: [postId], references: [id])
+  comment      Comment? @relation(fields: [commentId], references: [id])
   reportedUser User  @relation("ReportedInAlerts", fields: [reportedUserId], references: [id])
   resolvedBy   User? @relation("AlertsResolvedBy", fields: [resolvedById], references: [id])
 
@@ -306,7 +309,7 @@ enum NotificationType {
 
   // Appreciation surface — individual
   APPRECIATION_RECEIVED      // someone sent you an appreciation
-
+//appreciation sent can be added 
   // System — personal (sent only to the person whose day it is)
   BIRTHDAY_CELEBRATION       // "Happy birthday from Copods!" — entityId = system post id
   ANNIVERSARY_CELEBRATION    // "Happy N year anniversary!" — entityId = system post id

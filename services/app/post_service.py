@@ -219,7 +219,8 @@ async def _scan_post(post_id: str, author_id: str, caption: str | None, media: l
                 "flaggedAt": now,
             },
         )
-        await create_alert(post_id=post_id, author_id=author_id, flag_details={
+        await create_alert(post_id=post_id, author_id=author_id, 
+        flag_details={
             "text_score": text_score,
             "image_score": image_score,
             "reason": flag_reason.value if flag_reason else None,
@@ -460,7 +461,9 @@ async def create_comment(current_user, post_id: str, body) -> dict:
             },
             include=COMMENT_INCLUDE,
         )
-        await create_alert(post_id=post_id, author_id=current_user.id, flag_details={
+        await create_alert(
+            comment_id=comment.id,
+            post_id=post_id, author_id=current_user.id, flag_details={
             "text_score": text_score,
             "reason": FlagReason.NSFW_TEXT.value,
         })

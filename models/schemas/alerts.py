@@ -55,12 +55,18 @@ class AlertResolvedByOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+class AlertCommentOut(BaseModel):
+    id: str
+    body: str
+    createdAt: datetime
+    model_config = {"from_attributes": True}
 
 # ── Main alert response DTO (OUT) ─────────────────────────────
 
 class AlertOut(BaseModel):
     id: str
     postId: str
+    commentId: Optional[str] = None   
     reportedUserId: str
     flagDetails: Optional[dict]
     resolvedAction: Optional[AlertAction]
@@ -68,6 +74,7 @@ class AlertOut(BaseModel):
     resolvedById: Optional[str]
     createdAt: datetime
     post: Optional[AlertPostOut]
+    comment: Optional[AlertCommentOut] = None
     reportedUser: Optional[AlertUserOut]
     resolvedBy: Optional[AlertResolvedByOut]
 

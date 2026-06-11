@@ -1,4 +1,5 @@
 # routes/alerts.py
+from models.schemas.alerts import AlertCommentOut
 import json
 from fastapi import APIRouter, Depends, Query
 from typing import Optional
@@ -30,12 +31,14 @@ alerts_router = APIRouter(
 
 def _serialize_alert(alert) -> dict:
     post = getattr(alert, "post", None)
+    comment = getattr(alert, "comment", None)
     reported_user = getattr(alert, "reportedUser", None)
     resolved_by = getattr(alert, "resolvedBy", None)
 
     return AlertOut(
         id=alert.id,
         postId=alert.postId,
+        commentId=alert.commentId,
         reportedUserId=alert.reportedUserId,
         flagDetails=json.loads(alert.flagDetails) if alert.flagDetails else None,
         resolvedAction=alert.resolvedAction,
@@ -51,6 +54,11 @@ def _serialize_alert(alert) -> dict:
             createdAt=post.createdAt,
             media=[AlertPostMediaOut(url=m.url, order=m.order) for m in (getattr(post, "media", []) or [])],
         ) if post else None,
+        comment=AlertCommentOut(  
+            id=comment.id,
+            body=comment.body,
+            createdAt=comment.createdAt,
+        ) if comment else None,
         reportedUser=AlertUserOut(
             id=reported_user.id,
             name=reported_user.name,
@@ -68,6 +76,7 @@ def _serialize_alert(alert) -> dict:
 
 ALERT_INCLUDE = {
     "post": {"include": {"media": {"order_by": {"order": "asc"}}}},
+    "comment": True,
     "reportedUser": True,
     "resolvedBy": True,
 }

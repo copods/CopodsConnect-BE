@@ -12,6 +12,7 @@ async def create_alert(
     post_id: str,
     author_id: str,
     flag_details: dict,
+    comment_id: str | None = None,
 ) -> None:
     """
     Creates an AdminAlert record and emails all admins.
@@ -22,10 +23,11 @@ async def create_alert(
     await db.adminalert.create(
         data={
             "postId": post_id,
+            "commentId":comment_id,
             "reportedUserId": author_id,
             "flagDetails": json.dumps(flag_details),
             "resolvedAction": None,
-"resolvedAt": None,
+            "resolvedAt": None,
         }
     )
 
@@ -74,14 +76,21 @@ async def resolve_alert(alert_id: str, action: AlertAction, resolved_by_id: str)
             "resolvedById": resolved_by_id,
         },
     )
-    updated_post = await db.post.update(
-        where={"id": alert.postId},
-        data={"status": new_post_status},
-    )
+    if alert.commentId:
+        updated_content = await db.comment.update(
+            where={"id": alert.commentId},
+            data={"status": new_post_status},
+        )
+    else:
+        updated_content = await db.post.update(
+            where={"id": alert.postId},
+            data={"status": new_post_status},
+        )
+
     # Notify the author when admin removes their post
-    if action == AlertAction.CONFIRMED_REMOVAL and updated_post:
+    if action == AlertAction.CONFIRMED_REMOVAL and updated_content:
         await notification_service.notify_post_removed_by_moderation(
             post_id=alert.postId,
             post_author_id=alert.reportedUserId,
-            flag_reason=updated_post.flagReason.value if updated_post.flagReason else "UNKNOWN"
+            flag_reason=updated_content.flagReason.value if updated_content.flagReason else "UNKNOWN" 
         )
