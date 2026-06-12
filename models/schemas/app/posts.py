@@ -101,6 +101,7 @@ class PostOut(BaseModel):
     sourceUrl: Optional[str] = None
     createdAt: datetime
     updatedAt: datetime
+    captionEditedAt: Optional[datetime] = None
     authorId: Optional[str] = None
     author: Optional[AuthorOut] = None
     media: list[MediaOut] = []
