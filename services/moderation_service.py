@@ -56,28 +56,28 @@ async def scan_text(text: str) -> tuple[float, str | None]:
     # return scores[top_category], top_category
     ----------------------------------------------------------------
     """
-    # if not text or not text.strip():
-    #     return 0.0, None
+    if not text or not text.strip():
+        return 0.0, None
 
-    # async with httpx.AsyncClient(timeout=10.0) as client:
-    #     resp = await client.post(
-    #         MISTRAL_API_URL,
-    #         headers={
-    #             "Authorization": f"Bearer {MISTRAL_API_KEY}",
-    #             "Content-Type": "application/json",
-    #         },
-    #         json={"model": "mistral-moderation-latest", "input": text},
-    #     )
-    #     resp.raise_for_status()
-    #     data = resp.json()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            MISTRAL_API_URL,
+            headers={
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"model": "mistral-moderation-latest", "input": text},
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
-    # result = data["results"][0]
-    # categories = result["category_scores"]
-    # top_category = max(categories, key=categories.get)
-    # top_score = categories[top_category]
+    result = data["results"][0]
+    categories = result["category_scores"]
+    top_category = max(categories, key=categories.get)
+    top_score = categories[top_category]
 
-    # flagged = any(result["categories"].values())
-    # return top_score, top_category if flagged else None
+    flagged = any(result["categories"].values())
+    return top_score, top_category if flagged else None
 
 
 # ── Image Scan ────────────────────────────────────────────────
