@@ -212,9 +212,8 @@ model CommentTag {
 
 model AppreciationType {
   id           String   @id @default(cuid())
-  name         String
-  emoji        String
-  animationUrl String?  @map("animation_url")
+  name         String   @unique
+  emojiPath    String   @map("emoji_path")
   description  String?
   isActive     Boolean  @default(true) @map("is_active")
   displayOrder Int      @default(0)    @map("display_order")

@@ -1,8 +1,9 @@
+# services/app/appreciation_service.py
 from datetime import datetime, timezone
 
 from db.client import db
 from utils.exceptions import AppException
-from constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, BASE_URL
 from models.schemas.app.appreciations import (
     AppreciationOut,
     AppreciationListResponse,
@@ -36,6 +37,10 @@ def _serialize_recipient(r) -> RecipientOut:
     )
 
 
+def _build_emoji_url(emoji_path: str) -> str:
+    return f"{BASE_URL}/{emoji_path}"
+
+
 def _serialize_appreciation(a) -> dict:
     sender = getattr(a, "sender", None)
     appreciation_type = getattr(a, "appreciationType", None)
@@ -54,8 +59,7 @@ def _serialize_appreciation(a) -> dict:
         appreciationType=AppreciationTypeMinimalOut(
             id=appreciation_type.id,
             name=appreciation_type.name,
-            emoji=appreciation_type.emoji,
-            animationUrl=appreciation_type.animationUrl,
+            emojiUrl=_build_emoji_url(appreciation_type.emojiPath),
             description=appreciation_type.description,
             displayOrder=appreciation_type.displayOrder,
         ) if appreciation_type else None,
@@ -96,8 +100,7 @@ async def get_active_types() -> list[dict]:
         AppreciationTypeMinimalOut(
             id=t.id,
             name=t.name,
-            emoji=t.emoji,
-            animationUrl=t.animationUrl,
+            emojiUrl=_build_emoji_url(t.emojiPath),
             description=t.description,
             displayOrder=t.displayOrder,
         ).model_dump(mode="json")
@@ -230,7 +233,6 @@ async def update_appreciation(current_user, appreciation_id: str, body) -> dict:
             include=APPRECIATION_INCLUDE,
         )
     else:
-        # Only recipients changed — re-fetch fresh state
         updated = await db.appreciation.find_unique(
             where={"id": appreciation_id},
             include=APPRECIATION_INCLUDE,
@@ -268,7 +270,6 @@ async def mark_seen(current_user, appreciation_id: str) -> dict:
         raise AppException(403, "You are not a recipient of this appreciation")
 
     if recipient.seenAt is not None:
-        # Already seen — idempotent
         return MarkSeenResponse(
             appreciationId=appreciation_id,
             seenAt=recipient.seenAt,

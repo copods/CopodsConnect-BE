@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
+from fastapi.staticfiles import StaticFiles  # ← NEW
 from prisma.errors import PrismaError
 
 from db.client import db
@@ -55,6 +56,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=APP_NAME, lifespan=lifespan)
+
+
+# --- Static files ---
+app.mount("/assets", StaticFiles(directory="public/assets"), name="assets")  # ← NEW
 
 
 # --- CORS ---
