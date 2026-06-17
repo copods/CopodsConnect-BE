@@ -1,5 +1,7 @@
 #services/app/post_service.py
 from datetime import datetime, timezone
+from services.audit_service import write_audit_log
+from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
 
 from db.client import db
 from prisma.enums import PostType, ContentStatus, FlagReason
@@ -22,7 +24,6 @@ from services.app import storage_service
 from fastapi import BackgroundTasks
 from services.moderation_service import scan_text, scan_images
 from services.alert_service import create_alert
-from services.app import notification_service
 from constants import MODERATION_REVIEW_THRESHOLD
 
 POST_INCLUDE = {
@@ -182,6 +183,17 @@ async def create_post(current_user, body, background_tasks: BackgroundTasks) -> 
         data=create_data,
         include=FEED_INCLUDE,
     )
+    await write_audit_log(
+        event_type=AuditEventType.POST_CREATED,
+        actor_type=AuditActorType.USER,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.POST,
+        entity_id=post.id,
+        metadata={
+            "caption": body.caption[:80] if body.caption else None,
+            "postType": str(post.type),
+        },
+    )
 
     background_tasks.add_task(_scan_post, post.id, current_user.id, body.caption, body.media)
 
@@ -219,12 +231,25 @@ async def _scan_post(post_id: str, author_id: str, caption: str | None, media: l
                 "flaggedAt": now,
             },
         )
-        await create_alert(post_id=post_id, author_id=author_id, 
+        await create_alert(post_id=post_id, author_id=author_id,
         flag_details={
             "text_score": text_score,
             "image_score": image_score,
             "reason": flag_reason.value if flag_reason else None,
         })
+        await write_audit_log(
+            event_type=AuditEventType.POST_SCAN_COMPLETED,
+            actor_type=AuditActorType.SYSTEM,
+            entity_type=AuditEntityType.POST,
+            entity_id=post_id,
+            metadata={
+                "finalStatus": "FLAGGED",
+                "postAuthorId": author_id,
+                "textScore": text_score,
+                "imageScore": image_score,
+                "flagReason": flag_reason.value if flag_reason else None,
+            },
+        )
 
     else:
         post = await db.post.update(
@@ -232,20 +257,34 @@ async def _scan_post(post_id: str, author_id: str, caption: str | None, media: l
             data={"status": ContentStatus.PUBLISHED},
             include={"tags": True},
         )
-
-        # Fire POST_TAG notifications now that the post is publicly visible.
-        # Only for USER_POST — system posts (birthday, anniversary) handle
-        # their own notifications in daily_celebration_job.
-        # # pyrefly: ignore [missing-import]
-        # from prisma.enums import PostType
+        await write_audit_log(
+            event_type=AuditEventType.POST_SCAN_COMPLETED,
+            actor_type=AuditActorType.SYSTEM,
+            entity_type=AuditEntityType.POST,
+            entity_id=post_id,
+            metadata={
+                "finalStatus": "PUBLISHED",
+                "postAuthorId": author_id,
+                "textScore": text_score,
+                "imageScore": image_score,
+            },
+        )
+        # Write a USER_TAGGED_IN_POST audit event per tag.
+        # The notification engine will fan out notifications from these.
         if post.type == PostType.USER_POST and post.tags:
             for tag in post.tags:
-                await notification_service.notify_post_tagged(
-                    tagger_id=author_id,
-                    tagged_user_id=tag.taggedUserId,
-                    post_id=post_id,
-                    post_caption=post.caption,
+                await write_audit_log(
+                    event_type=AuditEventType.USER_TAGGED_IN_POST,
+                    actor_type=AuditActorType.USER,
+                    actor_id=author_id,
+                    entity_type=AuditEntityType.POST,
+                    entity_id=post_id,
+                    metadata={
+                        "taggedUserId": tag.taggedUserId,
+                        "postCaption": post.caption[:80] if post.caption else None,
+                    },
                 )
+
 
 async def get_feed(
     current_user,
@@ -343,6 +382,13 @@ async def delete_post(current_user, post_id: str) -> dict:
             "flagReason": FlagReason.NORMAL,
         },
     )
+    await write_audit_log(
+        event_type=AuditEventType.POST_DELETED_BY_AUTHOR,
+        actor_type=AuditActorType.USER,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.POST,
+        entity_id=post_id,
+    )
     return DeletePostResponse(deletedPostId=post_id).model_dump(mode="json")
 
 
@@ -364,13 +410,17 @@ async def like_post(current_user, post_id: str) -> dict:
     count = await db.like.count(where={"postId": post_id})
 
     # Notify post author — skipped internally if liker == author
-    if post.authorId:
-        await notification_service.notify_post_liked(
-            liker_id=current_user.id,
-            post_id=post_id,
-            post_author_id=post.authorId,
-            post_caption=post.caption,
-        )
+    await write_audit_log(
+        event_type=AuditEventType.POST_LIKED,
+        actor_type=AuditActorType.USER,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.LIKE,
+        entity_id=post_id,
+        metadata={
+            "postAuthorId":post.authorId,
+            "postCaption":post.caption[:80] if post.caption else None
+        },
+    )
 
     return LikeResponse(postId=post_id, liked=True, likeCount=count).model_dump(mode="json")
 
@@ -389,14 +439,6 @@ async def unlike_post(current_user, post_id: str) -> dict:
 
     await db.like.delete(where={"id": existing.id})
     count = await db.like.count(where={"postId": post_id})
-
-    # Roll back unread POST_LIKE notification if author hasn't seen it yet
-    if post.authorId:
-        await notification_service.notify_post_unliked(
-            unliker_id=current_user.id,
-            post_id=post_id,
-            post_author_id=post.authorId,
-        )
 
     return LikeResponse(postId=post_id, liked=False, likeCount=count).model_dump(mode="json")
 
@@ -481,43 +523,42 @@ async def create_comment(current_user, post_id: str, body) -> dict:
             include=COMMENT_INCLUDE,
         )
 
+        # Resolve parent comment to get its author id for the metadata
+        parent_comment = None
         if parent_id:
-            # This is a reply — notify the parent comment author.
-            # We need the parent comment author id. Fetch it since we
-            # already validated the parent exists above.
             parent_comment = await db.comment.find_unique(where={"id": parent_id})
-            if parent_comment:
-                await notification_service.notify_comment_replied(
-                    replier_id=current_user.id,
-                    parent_comment_id=parent_id,
-                    parent_comment_author_id=parent_comment.authorId,
-                    post_id=post_id,
-                    comment_snippet=body.body,
-                )
-                # Do NOT fire notify_post_commented here even if the parent
-                # comment author is also the post author — COMMENT_REPLY
-                # takes precedence. The post author is not notified of replies
-                # to comments on their post (same behaviour as Instagram/LinkedIn).
-        else:
-            # Top-level comment — notify the post author.
-            # Skipped internally if commenter == post author.
-            if post.authorId:
-                await notification_service.notify_post_commented(
-                    commenter_id=current_user.id,
-                    post_id=post_id,
-                    post_author_id=post.authorId,
-                    post_caption=post.caption,
-                )
 
-        # Notify tagged users in the comment — skipped internally per user
-        # if tagger == tagged user.
+        await write_audit_log(
+            event_type=AuditEventType.COMMENT_CREATED,
+            actor_type=AuditActorType.USER,
+            actor_id=current_user.id,
+            entity_type=AuditEntityType.COMMENT,
+            entity_id=comment.id,
+            parent_entity_type=AuditEntityType.POST,
+            parent_entity_id=post_id,
+            metadata={
+                "postAuthorId": post.authorId,
+                "parentCommentId": parent_id,
+                "parentCommentAuthorId": parent_comment.authorId if parent_comment else None,
+                "commentSnippet": body.body[:80],
+            },
+        )
+
+        # One audit event per tagged user — notification engine fans out per event
         for uid in valid_tagged_ids:
-            await notification_service.notify_comment_tagged(
-                tagger_id=current_user.id,
-                tagged_user_id=uid,
-                comment_id=comment.id,
-                post_id=post_id,
-                comment_snippet=body.body,
+            await write_audit_log(
+                event_type=AuditEventType.USER_TAGGED_IN_COMMENT,
+                actor_type=AuditActorType.USER,
+                actor_id=current_user.id,
+                entity_type=AuditEntityType.COMMENT,
+                entity_id=comment.id,
+                parent_entity_type=AuditEntityType.POST,
+                parent_entity_id=post_id,
+                metadata={
+                    "taggedUserId": uid,
+                    "postId": post_id,
+                    "commentSnippet": body.body[:80],
+                },
             )
 
         return _serialize_comment(comment).model_dump(mode="json")
@@ -566,6 +607,15 @@ async def delete_comment(current_user, comment_id: str) -> dict:
             "status": ContentStatus.REMOVED,
             "flagReason": FlagReason.NORMAL,
         },
+    )
+    await write_audit_log(
+        event_type=AuditEventType.COMMENT_DELETED_BY_AUTHOR,
+        actor_type=AuditActorType.USER,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.COMMENT,
+        entity_id=comment_id,
+        parent_entity_type=AuditEntityType.POST,
+        parent_entity_id=comment.postId,
     )
     return DeleteCommentResponse(deletedCommentId=comment_id).model_dump(mode="json")
 

@@ -7,7 +7,8 @@ import logging
 from datetime import datetime
 from db.client import db
 from zoneinfo import ZoneInfo
-from services.app import notification_service
+from services.audit_service import write_audit_log
+from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
 
 logger = logging.getLogger(__name__)
 
@@ -52,14 +53,8 @@ async def create_daily_celebration_posts() -> None:
                 }
             )
 
-            # Personal wish to the birthday person
-            await notification_service.notify_birthday_celebration(
-                birthday_user_id=user_id,
-                person_name=name,
-                post_id=post.id,
-            )
-
-            # Broadcast to all other active app users so they can wish/appreciate
+            # Fetch all other active app users — their IDs go into metadata
+            # so the notification engine can fan out in one shot
             peer_users = await db.user.find_many(
                 where={
                     "deletedAt": None,
@@ -68,12 +63,19 @@ async def create_daily_celebration_posts() -> None:
                     "id": {"not": user_id},
                 }
             )
-            for peer in peer_users:
-                await notification_service.notify_peer_birthday(
-                    recipient_id=peer.id,
-                    person_name=name,
-                    post_id=post.id,
-                )
+            peer_ids = [p.id for p in peer_users]
+
+            await write_audit_log(
+                event_type=AuditEventType.SYSTEM_BIRTHDAY_POST_CREATED,
+                actor_type=AuditActorType.SYSTEM,
+                entity_type=AuditEntityType.POST,
+                entity_id=post.id,
+                metadata={
+                    "birthdayUserId": user_id,
+                    "personName": name,
+                    "peerRecipientIds": peer_ids,
+                },
+            )
 
         # ── Work Anniversaries ─────────────────────────────────────────────────
         anniversary_users = await db.query_raw(
@@ -112,15 +114,6 @@ async def create_daily_celebration_posts() -> None:
                 }
             )
 
-            # Personal wish to the anniversary person
-            await notification_service.notify_anniversary_celebration(
-                anniversary_user_id=user_id,
-                person_name=name,
-                post_id=post.id,
-                years_at_company=years,
-            )
-
-            # Broadcast to all other active app users
             peer_users = await db.user.find_many(
                 where={
                     "deletedAt": None,
@@ -129,13 +122,20 @@ async def create_daily_celebration_posts() -> None:
                     "id": {"not": user_id},
                 }
             )
-            for peer in peer_users:
-                await notification_service.notify_peer_anniversary(
-                    recipient_id=peer.id,
-                    person_name=name,
-                    post_id=post.id,
-                    years_at_company=years,
-                )
+            peer_ids = [p.id for p in peer_users]
+
+            await write_audit_log(
+                event_type=AuditEventType.SYSTEM_ANNIVERSARY_POST_CREATED,
+                actor_type=AuditActorType.SYSTEM,
+                entity_type=AuditEntityType.POST,
+                entity_id=post.id,
+                metadata={
+                    "anniversaryUserId": user_id,
+                    "personName": name,
+                    "yearsAtCompany": years,
+                    "peerRecipientIds": peer_ids,
+                },
+            )
 
     except Exception as e:
         logger.error("daily_celebration_job failed: %s", e)

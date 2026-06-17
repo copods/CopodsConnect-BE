@@ -12,6 +12,8 @@ from prisma.enums import Role
 from utils.exceptions import AppException
 from utils.email import send_invitation_email, send_admin_invitation_email, send_promotion_email, send_demotion_email
 from constants import ALLOWED_EMAIL_DOMAIN, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from services.audit_service import write_audit_log
+from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
 
 BULK_INVITE_WORKSHEET_NAME = "Invitations"
 
@@ -158,6 +160,13 @@ async def _batch_invite_create(
         for create_data in to_create:
             invited.append({"email": create_data["email"]})
             emails_to_send.append(create_data["email"])
+            await write_audit_log(
+                event_type=AuditEventType.USER_INVITED,
+                actor_type=AuditActorType.ADMIN,
+                entity_type=AuditEntityType.INVITATION,
+                entity_id=create_data["email"],
+                metadata={"email": create_data["email"], "role": str(create_data.get("role", "MEMBER"))},
+            )
 
     return invited, emails_to_send
 
@@ -350,6 +359,14 @@ async def resend_invite(emails: list) -> dict:
         else:
             await send_invitation_email(email)
 
+        await write_audit_log(
+            event_type=AuditEventType.USER_INVITATION_RESENT,
+            actor_type=AuditActorType.ADMIN,
+            entity_type=AuditEntityType.INVITATION,
+            entity_id=email,
+            metadata={"email": email, "role": str(user.role)},
+        )
+
         sent.append({"email": email})
 
     return {
@@ -388,6 +405,13 @@ async def delete_user(current_user, target_user_id: str) -> dict:
         where={"id": target_user_id},
         data={"deletedAt": now}
     )
+    await write_audit_log(
+        event_type=AuditEventType.USER_SOFT_DELETED,
+        actor_type=AuditActorType.ADMIN,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={"deletedBy": current_user.id},
+    )
     return {"deletedUserId": target_user_id}
 
 
@@ -417,6 +441,13 @@ async def bulk_delete_users(current_user, user_ids: list) -> dict:
             where={"id": user_id},
             data={"deletedAt": now}
         )
+        await write_audit_log(
+            event_type=AuditEventType.USER_SOFT_DELETED,
+            actor_type=AuditActorType.ADMIN,
+            entity_type=AuditEntityType.USER,
+            entity_id=user_id,
+            metadata={"deletedBy": current_user.id},
+        )
         deleted.append({"userId": user_id})
 
     return {"deleted": deleted, "skipped": skipped}
@@ -443,6 +474,13 @@ async def restore_user(current_user, target_user_id: str) -> dict:
     restored_user = await db.user.update(
         where={"id": target_user_id},
         data={"deletedAt": None}
+    )
+    await write_audit_log(
+        event_type=AuditEventType.USER_RESTORED,
+        actor_type=AuditActorType.ADMIN,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={"restoredBy": current_user.id},
     )
     return serialize_user(restored_user)
 
@@ -486,6 +524,20 @@ async def ban_user(current_user, target_user_id: str, duration_hours: int, reaso
         }
     )
 
+    await write_audit_log(
+        event_type=AuditEventType.USER_BANNED,
+        actor_type=AuditActorType.ADMIN,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={
+            "bannedBy": current_user.id,
+            "durationHours": duration_hours,
+            "reason": reason,
+            "bannedUntil": banned_until.isoformat(),
+        },
+    )
+
     return {
         "userId": updated_user.id,
         "isBanned": updated_user.isBanned,
@@ -522,6 +574,19 @@ async def edit_ban(current_user, target_user_id: str, duration_hours: int, ban_u
         data=update_data
     )
 
+    await write_audit_log(
+        event_type=AuditEventType.USER_BAN_UPDATED,
+        actor_type=AuditActorType.ADMIN,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={
+            "updatedBy": current_user.id,
+            "newDurationHours": duration_hours,
+            "bannedUntil": updated_user.bannedUntil.isoformat(),
+        },
+    )
+
     return {
         "userId": updated_user.id,
         "isBanned": updated_user.isBanned,
@@ -551,6 +616,15 @@ async def unban_user(current_user, target_user_id: str) -> dict:
             "bannedUntil": None,
             "banReason": None,
         }
+    )
+
+    await write_audit_log(
+        event_type=AuditEventType.USER_UNBANNED_MANUAL,
+        actor_type=AuditActorType.ADMIN,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={"unbannedBy": current_user.id},
     )
 
     return {"userId": target_user_id, "isBanned": False}
@@ -593,6 +667,15 @@ async def change_role(current_user, target_user_id: str, new_role: str) -> dict:
     elif new_role == "MEMBER":
         await send_demotion_email(updated_user.email)
 
+    await write_audit_log(
+        event_type=AuditEventType.USER_ROLE_CHANGED,
+        actor_type=AuditActorType.ADMIN,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={"changedBy": current_user.id, "newRole": new_role},
+    )
+
     return {
         "userId": updated_user.id,
         "role": str(updated_user.role)
@@ -632,6 +715,15 @@ async def edit_user(current_user, target_user_id: str, updates: dict) -> dict:
     updated_user = await db.user.update(
         where={"id": target_user_id},
         data=update_data
+    )
+
+    await write_audit_log(
+        event_type=AuditEventType.USER_PROFILE_UPDATED,
+        actor_type=AuditActorType.ADMIN,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={"updatedBy": current_user.id, "fields": list(update_data.keys())},
     )
 
     return serialize_user(updated_user)

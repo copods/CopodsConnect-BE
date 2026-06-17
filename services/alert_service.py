@@ -1,5 +1,6 @@
 # services/alert_service.py
-from services.app import notification_service
+from services.audit_service import write_audit_log
+from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
 import json
 from datetime import datetime, timezone
 
@@ -20,7 +21,7 @@ async def create_alert(
     """
     now = datetime.now(timezone.utc)
 
-    await db.adminalert.create(
+    alert = await db.adminalert.create(
         data={
             "postId": post_id,
             "commentId":comment_id,
@@ -29,6 +30,20 @@ async def create_alert(
             "resolvedAction": None,
             "resolvedAt": None,
         }
+    )
+
+    await write_audit_log(
+        event_type=AuditEventType.ALERT_CREATED,
+        actor_type=AuditActorType.SYSTEM,
+        entity_type=AuditEntityType.ALERT,
+        entity_id=alert.id,
+        parent_entity_type=AuditEntityType.POST,
+        parent_entity_id=post_id,
+        metadata={
+            "reportedUserId": author_id,
+            "commentId": comment_id,
+            "flagDetails": flag_details,
+        },
     )
 
     # Fetch all admins + the flagged user for the email
@@ -87,10 +102,20 @@ async def resolve_alert(alert_id: str, action: AlertAction, resolved_by_id: str)
             data={"status": new_post_status},
         )
 
-    # Notify the author when admin removes their post
-    if action == AlertAction.CONFIRMED_REMOVAL and updated_content:
-        await notification_service.notify_post_removed_by_moderation(
-            post_id=alert.postId,
-            post_author_id=alert.reportedUserId,
-            flag_reason=updated_content.flagReason.value if updated_content.flagReason else "UNKNOWN" 
-        )
+    # Write audit log for the resolution — notification engine notifies author on CONFIRMED_REMOVAL
+    await write_audit_log(
+        event_type=AuditEventType.ALERT_RESOLVED,
+        actor_type=AuditActorType.ADMIN,
+        actor_id=resolved_by_id,
+        entity_type=AuditEntityType.ALERT,
+        entity_id=alert_id,
+        parent_entity_type=AuditEntityType.POST,
+        parent_entity_id=alert.postId,
+        metadata={
+            "resolvedAction": action.value,
+            "reportedUserId": alert.reportedUserId,
+            "postId": alert.postId,
+            "commentId": alert.commentId,
+            "flagReason": updated_content.flagReason if updated_content and updated_content.flagReason else None,
+        },
+    )
