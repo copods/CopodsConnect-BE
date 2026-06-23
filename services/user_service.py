@@ -1,6 +1,7 @@
 # services/user_service.py
 import asyncio
 import io
+import json
 import math
 import re
 import openpyxl
@@ -94,26 +95,43 @@ def derive_panel_status(user) -> str:
     return "ACTIVE"
 
 
-def serialize_user(u) -> dict:
-    return {
-        "id": u.id,
-        "email": u.email,
-        "name": u.name,
-        "picture": u.picture,
-        "designation": u.designation,
-        "dateOfJoining": u.dateOfJoining.isoformat() if u.dateOfJoining else None,
-        "birthdate": u.birthdate.isoformat() if u.birthdate else None,
+# 1. Update serialize_user to accept an active_alert parameter
+def serialize_user(u, active_alert=None)->dict:
+    data = {
+        "id":u.id,
+        "email":u.email,
+        "name":u.name,
+        "picture":u.picture,
+        "designation":u.designation,
+        "dateOfJoining":u.dateOfJoining.isoformat() if u.dateOfJoining else None,
+        "birthdate":u.birthdate.isoformat() if u.birthdate else None, 
         "role": str(u.role),
         "appStatus": derive_app_status(u),
-        "panelStatus": derive_panel_status(u),
-        "isBanned": u.isBanned,
-        "bannedUntil": u.bannedUntil.isoformat() if u.bannedUntil else None,
-        "banReason": u.banReason,
-        "hasLoggedInApp": u.hasLoggedInApp,
-        "hasLoggedInPanel": u.hasLoggedInPanel,
+        "panelStatus":derive_panel_status(u),
+        "isBanned":u.isBanned,
+        "bannedUntil": u.bannedUntil.isoformat() if u.bannedUntil else None, 
+        "banReason":u.banReason,
+        "hasLoggedInApp":u.hasLoggedInApp,
+        "hasLoggedInPanel":u.hasLoggedInPanel,
         "createdAt": u.createdAt.isoformat(),
-        "deletedAt": u.deletedAt.isoformat() if u.deletedAt else None,
+        "deletedAt":u.deletedAt.isoformat() if u.deletedAt else None,
     }
+    # Attach activeAlert if passed 
+    if active_alert:
+        reason = None
+        if active_alert.flagDetails:
+            try: 
+                details = json.loads(active_alert.flagDetails)
+                reason = details.get("reason")
+            except Exception:
+                pass 
+        
+        data["activeAlert"] = {
+            "id":active_alert.id,
+            "reason": reason or active_alert.flaggedPhrase or "Flagged content"
+        }
+
+    return data
 
 
 # ============================================================
@@ -746,6 +764,7 @@ async def get_all_users(
     role: str = None,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
+    exclude_id: str = None,
 ) -> dict:
     if status is not None and status not in VALID_LIST_STATUSES:
         raise AppException(
@@ -760,6 +779,10 @@ async def get_all_users(
 
     # Always start with deletedAt filter
     where: dict = {}
+
+    # Exclude the currently logged-in admin from their own list
+    if exclude_id:
+        where["id"] = {"not": exclude_id}
 
     if status == "DELETED":
         where["deletedAt"] = {"not": None}
@@ -807,8 +830,28 @@ async def get_all_users(
 
     total_pages = math.ceil(total / page_size) if total else 0
 
+    # NEW: Fetch active alerts for the retrieved users
+    user_ids = [u.id for u in users]
+    active_alerts =[]
+    if user_ids:
+        active_alerts = await db.adminalert.find_many(
+            where={
+                "reportedUserId": {"in":user_ids},
+                "resolvedAction":None
+            },
+            order={"createdAt":"desc"}
+        )
+    
+    #Map user_id to their most recent active alert 
+    alerts_by_user ={}
+    for a in active_alerts:
+        if a.reportedUserId not in alerts_by_user:
+            alerts_by_user[a.reportedUserId]= a
+        
+    total_pages = math.ceil(total/page_size) if total else 0 
+
     return {
-        "users": [serialize_user(u) for u in users],
+        "users": [serialize_user(u,active_alert=alerts_by_user.get(u.id)) for u in users ],
         "total": total,
         "page": page,
         "pageSize": page_size,

@@ -115,34 +115,43 @@ async def _get_or_create_user(user_info: dict, verified_email: str, platform: st
         raise AppException(400, "Invalid platform. Must be 'app'")
 
     existing_user = await db.user.find_unique(where={"email": verified_email})
+    
+    # If the user doesn't exist yet, automatically create their account
     if not existing_user:
-        raise AppException(403, "You have not been invited to this application")
+        user = await db.user.create(
+            data={
+                "email": verified_email,
+                "name": name,
+                "picture": picture,
+                "googleSub": google_sub,
+                "role": "MEMBER",  # Automatically default new app users to MEMBER
+                "hasLoggedInApp": True,
+            }
+        )
+    else:
+        # If the user already exists (was invited previously), just update their existing record
+        if existing_user.deletedAt is not None:
+            raise AppException(403, "This account has been deleted. Please contact your administrator.")
 
-    if existing_user.deletedAt is not None:
-        raise AppException(403, "This account has been deleted. Please contact your administrator.")
+        if existing_user.isBanned:
+            from utils.ban_check import raise_if_user_ban_active
+            raise_if_user_ban_active(existing_user)
+            await db.user.update(
+                where={"id": existing_user.id},
+                data={"isBanned": False, "bannedUntil": None, "banReason": None},
+            )
 
-    if existing_user.isBanned:
-        raise_if_user_ban_active(existing_user)
-        await db.user.update(
-            where={"id": existing_user.id},
-            data={"isBanned": False, "bannedUntil": None, "banReason": None},
+        user = await db.user.update(
+            where={"email": verified_email},
+            data={
+                "googleSub": google_sub,
+                # Only fill name/picture from Google if the user has not set their own yet
+                **({ "name": name } if existing_user.name is None else {}),
+                **({ "picture": picture } if existing_user.picture is None else {}),
+                "hasLoggedInApp": True,
+            },
         )
 
-    user = await db.user.update(
-        where={"email": verified_email},
-        data={
-            "googleSub": google_sub,
-            # Only fill name/picture from Google if the user has not set their own yet
-            **({
-                "name": name,
-            } if existing_user.name is None else {}),
-            **({
-                "picture": picture,
-            } if existing_user.picture is None else {}),
-            "hasLoggedInApp": True,
-            # do NOT force role here; keep invite-assigned role
-        },
-    )
 
     if not is_allowed_signin_email(user.email):
         raise GoogleLoginDomainDenied()

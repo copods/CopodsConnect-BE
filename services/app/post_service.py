@@ -1,4 +1,5 @@
 #services/app/post_service.py
+import asyncio
 from datetime import datetime, timezone
 from services.audit_service import write_audit_log
 from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
@@ -21,10 +22,15 @@ from models.schemas.app.posts import (
     DeleteCommentResponse,
 )
 from services.app import storage_service
-from fastapi import BackgroundTasks
-from services.moderation_service import scan_text, scan_images
-from services.alert_service import create_alert
+from services.moderation_service import (
+    scan_text,
+    scan_images,
+    check_blacklist,
+    check_whitelist,
+)
+from services.alert_service import create_alert, auto_resolve_alert
 from constants import MODERATION_REVIEW_THRESHOLD
+
 
 POST_INCLUDE = {
     "author": True,
@@ -155,15 +161,15 @@ def _serialize_post(
 
 # ── CRUD: Posts ───────────────────────────────────────────────
 
-async def create_post(current_user, body, background_tasks: BackgroundTasks) -> dict:
+async def create_post(current_user, body) -> dict:
     for m in body.media:
         storage_service.assert_allowed_post_media_url(m.url)
 
     create_data: dict = {
         "caption": body.caption,
-        "type": body.type,
-        "status": ContentStatus.PENDING_SCAN,
-        "author": {"connect": {"id": current_user.id}},
+        "type":    body.type,
+        "status":  ContentStatus.PENDING_SCAN,
+        "author":  {"connect": {"id": current_user.id}},
     }
 
     if body.media:
@@ -179,10 +185,8 @@ async def create_post(current_user, body, background_tasks: BackgroundTasks) -> 
             "create": [{"taggedUserId": uid} for uid in body.taggedUserIds],
         }
 
-    post = await db.post.create(
-        data=create_data,
-        include=FEED_INCLUDE,
-    )
+    post = await db.post.create(data=create_data, include=FEED_INCLUDE)
+
     await write_audit_log(
         event_type=AuditEventType.POST_CREATED,
         actor_type=AuditActorType.USER,
@@ -190,100 +194,177 @@ async def create_post(current_user, body, background_tasks: BackgroundTasks) -> 
         entity_type=AuditEntityType.POST,
         entity_id=post.id,
         metadata={
-            "caption": body.caption[:80] if body.caption else None,
+            "caption":  body.caption[:80] if body.caption else None,
             "postType": str(post.type),
         },
     )
 
-    background_tasks.add_task(_scan_post, post.id, current_user.id, body.caption, body.media)
-
-    return _serialize_post(post, current_user.id, include_comments=False)
-
-async def _scan_post(post_id: str, author_id: str, caption: str | None, media: list) -> None:
-    from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
 
+    # ── Step A0/A/B — Static + custom blacklist (no AI call) ──
+    if body.caption:
+        blacklist_hit = await check_blacklist(body.caption)
+        if blacklist_hit:
+            await db.post.update(
+                where={"id": post.id},
+                data={"status": ContentStatus.REMOVED, "flagReason": FlagReason.NSFW_TEXT},
+            )
+            await auto_resolve_alert(
+                post_id=post.id,
+                author_id=current_user.id,
+                flagged_phrase=blacklist_hit,
+            )
+            post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
+            return _serialize_post(post, current_user.id, include_comments=False)
+
+    # ── Step C — AI scan (no timeout — wait as long as needed) ─
+    image_urls = [m.url for m in body.media] if body.media else []
+
     try:
-        text_score, text_reason = await scan_text(caption) if caption else (0.0, None)
-        image_urls = [m.url for m in media] if media else []
-        image_score, image_reason = await scan_images(image_urls) if image_urls else (0.0, None)
-    except Exception as e:
-        # If moderation API fails for any reason, publish the post so it
-        # doesn't get stuck in PENDING_SCAN forever. Log for visibility.
-        print(f"[moderation] scan failed for post {post_id}: {e}")
-        await db.post.update(
-            where={"id": post_id},
-            data={"status": ContentStatus.PUBLISHED},
+        (text_score, text_category, text_phrase, text_confidence), \
+        (image_score, image_reason) = await asyncio.gather(
+            scan_text(body.caption) if body.caption else _noop_text_scan(),
+            scan_images(image_urls) if image_urls else _noop_image_scan(),
         )
-        return
+    except Exception as e:
+        print(f"[moderation] AI scan failed for post {post.id}: {e}")
+        await db.post.delete(where={"id": post.id})
+        raise AppException(503, "Post could not be processed. Please try again.")
 
-    score = max(text_score, image_score)
-    flag_reason = (
-        FlagReason.NSFW_IMAGE if image_score >= text_score else FlagReason.NSFW_TEXT
-    ) if score >= MODERATION_REVIEW_THRESHOLD else None
+    # ── Text flagged ───────────────────────────────────────────
+    if text_score >= MODERATION_REVIEW_THRESHOLD:
+        whitelist_decision = await check_whitelist(text_phrase, text_confidence)
 
-    if score >= MODERATION_REVIEW_THRESHOLD:
+        if whitelist_decision == "auto_publish":
+            post = await db.post.update(
+                where={"id": post.id},
+                data={"status": ContentStatus.PUBLISHED},
+                include={"tags": True},
+            )
+            await _write_published_audit(post, current_user.id, text_score, image_score)
+            return _serialize_post(post, current_user.id, include_comments=False)
+
+        note = (
+            f"Whitelisted term ('{text_phrase}') — AI flagged anyway "
+            f"(confidence: {text_confidence:.2f})"
+            if whitelist_decision == "queue_with_note" else None
+        )
+
         await db.post.update(
-            where={"id": post_id},
+            where={"id": post.id},
             data={
-                "status": ContentStatus.FLAGGED,
-                "flagReason": flag_reason,
+                "status":    ContentStatus.FLAGGED,
+                "flagReason": FlagReason.NSFW_TEXT,
                 "flaggedAt": now,
             },
         )
-        await create_alert(post_id=post_id, author_id=author_id,
-        flag_details={
-            "text_score": text_score,
-            "image_score": image_score,
-            "reason": flag_reason.value if flag_reason else None,
-        })
+        await create_alert(
+            post_id=post.id,
+            author_id=current_user.id,
+            flag_details={
+                "text_score":  text_score,
+                "image_score": image_score,
+                "reason":      FlagReason.NSFW_TEXT.value,
+                "category":    text_category,
+                "confidence":  text_confidence,
+            },
+            flagged_phrase=text_phrase,
+            note=note,
+        )
         await write_audit_log(
             event_type=AuditEventType.POST_SCAN_COMPLETED,
             actor_type=AuditActorType.SYSTEM,
             entity_type=AuditEntityType.POST,
-            entity_id=post_id,
+            entity_id=post.id,
             metadata={
-                "finalStatus": "FLAGGED",
-                "postAuthorId": author_id,
-                "textScore": text_score,
-                "imageScore": image_score,
-                "flagReason": flag_reason.value if flag_reason else None,
+                "finalStatus":  "FLAGGED",
+                "postAuthorId": current_user.id,
+                "textScore":    text_score,
+                "imageScore":   image_score,
+                "flagReason":   FlagReason.NSFW_TEXT.value,
             },
         )
+        post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
+        return _serialize_post(post, current_user.id, include_comments=False)
 
-    else:
-        post = await db.post.update(
-            where={"id": post_id},
-            data={"status": ContentStatus.PUBLISHED},
-            include={"tags": True},
+    # ── Image flagged ──────────────────────────────────────────
+    if image_score >= MODERATION_REVIEW_THRESHOLD:
+        await db.post.update(
+            where={"id": post.id},
+            data={
+                "status":    ContentStatus.FLAGGED,
+                "flagReason": FlagReason.NSFW_IMAGE,
+                "flaggedAt": now,
+            },
+        )
+        await create_alert(
+            post_id=post.id,
+            author_id=current_user.id,
+            flag_details={
+                "text_score":  text_score,
+                "image_score": image_score,
+                "reason":      FlagReason.NSFW_IMAGE.value,
+            },
+            flagged_phrase=None,
         )
         await write_audit_log(
             event_type=AuditEventType.POST_SCAN_COMPLETED,
             actor_type=AuditActorType.SYSTEM,
             entity_type=AuditEntityType.POST,
-            entity_id=post_id,
+            entity_id=post.id,
             metadata={
-                "finalStatus": "PUBLISHED",
-                "postAuthorId": author_id,
-                "textScore": text_score,
-                "imageScore": image_score,
+                "finalStatus":  "FLAGGED",
+                "postAuthorId": current_user.id,
+                "textScore":    text_score,
+                "imageScore":   image_score,
+                "flagReason":   FlagReason.NSFW_IMAGE.value,
             },
         )
-        # Write a USER_TAGGED_IN_POST audit event per tag.
-        # The notification engine will fan out notifications from these.
-        if post.type == PostType.USER_POST and post.tags:
-            for tag in post.tags:
-                await write_audit_log(
-                    event_type=AuditEventType.USER_TAGGED_IN_POST,
-                    actor_type=AuditActorType.USER,
-                    actor_id=author_id,
-                    entity_type=AuditEntityType.POST,
-                    entity_id=post_id,
-                    metadata={
-                        "taggedUserId": tag.taggedUserId,
-                        "postCaption": post.caption[:80] if post.caption else None,
-                    },
-                )
+        post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
+        return _serialize_post(post, current_user.id, include_comments=False)
+
+    # ── All clean — publish ────────────────────────────────────
+    post = await db.post.update(
+        where={"id": post.id},
+        data={"status": ContentStatus.PUBLISHED},
+        include={"tags": True},
+    )
+    await _write_published_audit(post, current_user.id, text_score, image_score)
+    return _serialize_post(post, current_user.id, include_comments=False)
+
+
+async def _noop_text_scan():
+    return (0.0, None, None, 0.0)
+
+async def _noop_image_scan():
+    return (0.0, None)
+
+async def _write_published_audit(post, author_id: str, text_score: float, image_score: float):
+    await write_audit_log(
+        event_type=AuditEventType.POST_SCAN_COMPLETED,
+        actor_type=AuditActorType.SYSTEM,
+        entity_type=AuditEntityType.POST,
+        entity_id=post.id,
+        metadata={
+            "finalStatus":  "PUBLISHED",
+            "postAuthorId": author_id,
+            "textScore":    text_score,
+            "imageScore":   image_score,
+        },
+    )
+    if post.type == PostType.USER_POST and post.tags:
+        for tag in post.tags:
+            await write_audit_log(
+                event_type=AuditEventType.USER_TAGGED_IN_POST,
+                actor_type=AuditActorType.USER,
+                actor_id=author_id,
+                entity_type=AuditEntityType.POST,
+                entity_id=post.id,
+                metadata={
+                    "taggedUserId": tag.taggedUserId,
+                    "postCaption":  post.caption[:80] if post.caption else None,
+                },
+            )
 
 
 async def get_feed(
@@ -485,32 +566,98 @@ async def create_comment(current_user, post_id: str, body) -> dict:
     }
 
     now = datetime.now(timezone.utc)
-    text_score, text_reason = await scan_text(body.body)
+
+    # ── Blacklist check ───────────────────────────────────────
+    blacklist_hit = await check_blacklist(body.body)
+    if blacklist_hit:
+        comment = await db.comment.create(
+            data={
+                "postId":     post_id,
+                "authorId":   current_user.id,
+                "body":       body.body,
+                "parentId":   parent_id,
+                "status":     ContentStatus.REMOVED,
+                "flagReason": FlagReason.NSFW_TEXT,
+                "flaggedAt":  now,
+                **({
+                    "tags": {"create": [{"taggedUserId": uid} for uid in valid_tagged_ids]}
+                } if valid_tagged_ids else {}),
+            },
+            include=COMMENT_INCLUDE,
+        )
+        await auto_resolve_alert(
+            post_id=post_id,
+            author_id=current_user.id,
+            flagged_phrase=blacklist_hit,
+            comment_id=comment.id,
+        )
+        return _serialize_comment(comment).model_dump(mode="json")
+
+    # ── AI scan ───────────────────────────────────────────────
+    try:
+        text_score, text_category, text_phrase, text_confidence = await scan_text(body.body)
+    except Exception as e:
+        print(f"[moderation] comment scan failed: {e}")
+        raise AppException(503, "Comment could not be processed. Please try again.")
 
     tag_create = [{"taggedUserId": uid} for uid in valid_tagged_ids]
 
     if text_score >= MODERATION_REVIEW_THRESHOLD:
+        whitelist_decision = await check_whitelist(text_phrase, text_confidence)
+
+        if whitelist_decision == "auto_publish":
+            comment = await db.comment.create(
+                data={
+                    "postId":   post_id,
+                    "authorId": current_user.id,
+                    "body":     body.body,
+                    "parentId": parent_id,
+                    "status":   ContentStatus.PUBLISHED,
+                    **({
+                        "tags": {"create": tag_create}
+                    } if tag_create else {}),
+                },
+                include=COMMENT_INCLUDE,
+            )
+            return _serialize_comment(comment).model_dump(mode="json")
+
+        note = (
+            f"Whitelisted term ('{text_phrase}') — AI flagged anyway "
+            f"(confidence: {text_confidence:.2f})"
+            if whitelist_decision == "queue_with_note" else None
+        )
+
         comment = await db.comment.create(
             data={
-                "postId": post_id,
-                "authorId": current_user.id,
-                "body": body.body,
-                "parentId": parent_id,
-                "status": ContentStatus.FLAGGED,
+                "postId":     post_id,
+                "authorId":   current_user.id,
+                "body":       body.body,
+                "parentId":   parent_id,
+                "status":     ContentStatus.FLAGGED,
                 "flagReason": FlagReason.NSFW_TEXT,
-                "flaggedAt": now,
-                **({"tags": {"create": tag_create}} if tag_create else {}),
+                "flaggedAt":  now,
+                **({
+                    "tags": {"create": tag_create}
+                } if tag_create else {}),
             },
             include=COMMENT_INCLUDE,
         )
         await create_alert(
             comment_id=comment.id,
-            post_id=post_id, author_id=current_user.id, flag_details={
-            "text_score": text_score,
-            "reason": FlagReason.NSFW_TEXT.value,
-        })
+            post_id=post_id,
+            author_id=current_user.id,
+            flag_details={
+                "text_score": text_score,
+                "reason":     FlagReason.NSFW_TEXT.value,
+                "category":   text_category,
+                "confidence": text_confidence,
+            },
+            flagged_phrase=text_phrase,
+            note=note,
+        )
         return _serialize_comment(comment).model_dump(mode="json")
     else:
+
         comment = await db.comment.create(
             data={
                 "postId": post_id,

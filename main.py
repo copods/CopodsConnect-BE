@@ -107,3 +107,10 @@ app.include_router(notifications_router, prefix=f"{API_PREFIX}/app")
 @app.get("/health")
 async def health():
     return api_response(200, message="OK12")
+
+from services.moderation_service import reload_static_filter, invalidate_blacklist_cache
+
+@app.on_event("startup")
+async def startup():
+    await reload_static_filter()       # loads better-profanity with current whitelist
+    await invalidate_blacklist_cache() # builds Aho-Corasick automata from DB

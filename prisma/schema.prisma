@@ -52,6 +52,8 @@ model User {
   receivedAppreciations AppreciationRecipient[] @relation("ReceivedAppreciations")
   reportedAlerts        AdminAlert[]            @relation("ReportedInAlerts")
   resolvedAlerts        AdminAlert[]            @relation("AlertsResolvedBy")
+  blacklistEntries      ModerationBlacklist[]   @relation("BlacklistAddedBy")
+  whitelistEntries      ModerationWhitelist[]   @relation("WhitelistAddedBy")
 
   // Every audit log row where this user was the actor (actorType USER or ADMIN)
   auditLogs     AuditLog[]         @relation("AuditActor")
@@ -114,7 +116,7 @@ model Post {
   createdAt  DateTime      @default(now()) @map("created_at")
   updatedAt  DateTime      @updatedAt @map("updated_at")
 
-  author   User?        @relation("PostAuthor", fields: [authorId], references: [id])
+  author   User?        @relation("PostAuthor", fields: [authorId], references: [id], onDelete: Cascade)
   media    PostMedia[]
   tags     PostTag[]
   likes    Like[]
@@ -148,7 +150,7 @@ model PostTag {
   createdAt    DateTime @default(now()) @map("created_at")
 
   post       Post @relation(fields: [postId], references: [id], onDelete: Cascade)
-  taggedUser User @relation("TaggedInPosts", fields: [taggedUserId], references: [id])
+  taggedUser User @relation("TaggedInPosts", fields: [taggedUserId], references: [id], onDelete: Cascade)
 
   @@unique([postId, taggedUserId])
   @@index([taggedUserId])
@@ -162,7 +164,7 @@ model Like {
   createdAt DateTime @default(now()) @map("created_at")
 
   post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
-  user User @relation("UserLikes", fields: [userId], references: [id])
+  user User @relation("UserLikes", fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([postId, userId])
   @@index([postId])
@@ -184,7 +186,7 @@ model Comment {
   updatedAt  DateTime      @updatedAt @map("updated_at")
 
   post    Post         @relation(fields: [postId], references: [id], onDelete: Cascade)
-  author  User         @relation("CommentAuthor", fields: [authorId], references: [id])
+  author  User         @relation("CommentAuthor", fields: [authorId], references: [id], onDelete: Cascade)
   parent  Comment?     @relation("CommentReplies", fields: [parentId], references: [id])
   replies Comment[]    @relation("CommentReplies")
   tags    CommentTag[]
@@ -202,7 +204,7 @@ model CommentTag {
   createdAt    DateTime @default(now()) @map("created_at")
 
   comment    Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
-  taggedUser User    @relation("TaggedInComments", fields: [taggedUserId], references: [id])
+  taggedUser User    @relation("TaggedInComments", fields: [taggedUserId], references: [id], onDelete: Cascade)
 
   @@unique([commentId, taggedUserId])
   @@index([taggedUserId])
@@ -237,7 +239,7 @@ model Appreciation {
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
 
-  sender           User                    @relation("SentAppreciations", fields: [senderId], references: [id])
+  sender           User                    @relation("SentAppreciations", fields: [senderId], references: [id], onDelete: Cascade)
   appreciationType AppreciationType        @relation(fields: [appreciationTypeId], references: [id])
   recipients       AppreciationRecipient[]
 
@@ -253,8 +255,8 @@ model AppreciationRecipient {
   seenAt         DateTime? @map("seen_at")
   createdAt      DateTime  @default(now()) @map("created_at")
 
-  appreciation Appreciation @relation(fields: [appreciationId], references: [id])
-  user         User         @relation("ReceivedAppreciations", fields: [userId], references: [id])
+  appreciation Appreciation @relation(fields: [appreciationId], references: [id], onDelete:Cascade)
+  user         User         @relation("ReceivedAppreciations", fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([appreciationId, userId])
   @@index([userId])
@@ -268,6 +270,8 @@ enum AlertAction {
   RESTORED
   CONFIRMED_REMOVAL
   AUTO_REMOVED
+  BLACKLISTED
+  WHITELISTED
 }
 
 // ============================================================
@@ -279,6 +283,7 @@ model AdminAlert {
   commentId      String?      @map("comment_id")
   reportedUserId String       @map("reported_user_id")
   flagDetails    String?      @map("flag_details")
+  flaggedPhrase  String?      @map("flagged_phrase")
   resolvedAt     DateTime?    @map("resolved_at")
   resolvedById   String?      @map("resolved_by_id")
   resolvedAction AlertAction? @map("resolved_action")
@@ -286,12 +291,46 @@ model AdminAlert {
 
   post         Post     @relation(fields: [postId], references: [id])
   comment      Comment? @relation(fields: [commentId], references: [id])
-  reportedUser User     @relation("ReportedInAlerts", fields: [reportedUserId], references: [id])
-  resolvedBy   User?    @relation("AlertsResolvedBy", fields: [resolvedById], references: [id])
+  reportedUser User     @relation("ReportedInAlerts", fields: [reportedUserId], references: [id], onDelete: Cascade)
+  resolvedBy   User?    @relation("AlertsResolvedBy", fields: [resolvedById], references: [id], onDelete: Cascade)
 
   @@index([resolvedAction])
   @@index([reportedUserId])
   @@map("admin_alerts")
+}
+// ============================================================
+// MODERATION LISTS
+// Admin-curated blacklist and whitelist for text moderation.
+// normalizedKey = squish_normalize(rawPhrase), used for dedup
+// only — runtime matching uses in-memory automatons.
+// ============================================================
+
+model ModerationBlacklist {
+  id            String   @id @default(cuid())
+  rawPhrase     String   @map("raw_phrase")
+  normalizedKey String   @unique @map("normalized_key")
+  addedById     String?   @map("added_by_id")
+  alertId       String?  @map("alert_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  addedBy User? @relation("BlacklistAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@index([normalizedKey])
+  @@map("moderation_blacklist")
+}
+
+model ModerationWhitelist {
+  id            String   @id @default(cuid())
+  rawPhrase     String   @map("raw_phrase")
+  normalizedKey String   @unique @map("normalized_key")
+  addedById     String?   @map("added_by_id")
+  alertId       String?  @map("alert_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  addedBy User? @relation("WhitelistAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@index([normalizedKey])
+  @@map("moderation_whitelist")
 }
 
 // ============================================================
@@ -423,7 +462,7 @@ model UserNotification {
   createdAt   DateTime  @default(now()) @map("created_at")
 
   auditLog  AuditLog @relation(fields: [auditLogId], references: [id], onDelete: Cascade)
-  recipient User     @relation("NotificationFeed", fields: [recipientId], references: [id])
+  recipient User     @relation("NotificationFeed", fields: [recipientId], references: [id], onDelete: Cascade)
 
   @@unique([auditLogId, recipientId])
   @@index([recipientId, createdAt(sort: Desc)])

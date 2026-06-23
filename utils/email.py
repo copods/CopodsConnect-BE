@@ -1,32 +1,47 @@
 # utils/email.py
 import asyncio
-import smtplib
 import os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import boto3
+from botocore.exceptions import ClientError
 
 # NOTE: Emails are fire-and-forget via thread pool. If the server restarts
 # mid-send, background emails in flight will be lost silently.
-# Use resend_invite to retry. A persistent queue (e.g. ARQ + Redis) should
-# replace this when reliability becomes a requirement.
+
+def get_ses_client():
+    """Helper to initialize the boto3 SES client using environment variables."""
+    return boto3.client(
+        'ses',
+        region_name=os.getenv("AWS_REGION", "us-east-1"),
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
+    )
+
+def _send_email_via_ses(to_email: str, subject: str, body_text: str) -> bool:
+    """Core function to send emails using Amazon SES."""
+    sender = os.getenv("MAIL_FROM", "no-reply@copods.co")
+    client = get_ses_client()
+
+    try:
+        response = client.send_email(
+            Destination={'ToAddresses': [to_email]},
+            Message={
+                'Body': {
+                    'Text': {'Charset': "UTF-8", 'Data': body_text},
+                },
+                'Subject': {'Charset': "UTF-8", 'Data': subject},
+            },
+            Source=sender,
+        )
+        return True
+    except ClientError as e:
+        print(f"Failed to send email via SES: {e.response['Error']['Message']}")
+        return False
 
 
 async def send_invitation_email(to_email: str) -> bool:
     """Sends app invitation email to a new user (MEMBER)."""
-    return await asyncio.to_thread(_send_invitation_email_sync, to_email)
-
-
-def _send_invitation_email_sync(to_email: str) -> bool:
-    try:
-        gmail_user = os.getenv("GMAIL_USER")
-        gmail_password = os.getenv("GMAIL_APP_PASSWORD")
-
-        msg = MIMEMultipart()
-        msg['From'] = gmail_user
-        msg['To'] = to_email
-        msg['Subject'] = "You are invited to join CopodsConnect"
-
-        body = """
+    subject = "You are invited to join CopodsConnect"
+    body = """
 Hi there,
 
 You have been invited to join CopodsConnect - your team's recognition and cultural platform.
@@ -38,33 +53,13 @@ Click the link below to sign in with your Google account and get started.
 Welcome aboard,
 The CopodsConnect Team
 """
-        msg.attach(MIMEText(body, 'plain'))
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(gmail_user, gmail_password)
-            server.sendmail(gmail_user, to_email, msg.as_string())
-
-        return True
-    except Exception:
-        return False
+    return await asyncio.to_thread(_send_email_via_ses, to_email, subject, body)
 
 
 async def send_admin_invitation_email(to_email: str) -> bool:
     """Sends admin panel invitation email to a new admin (ADMIN role)."""
-    return await asyncio.to_thread(_send_admin_invitation_email_sync, to_email)
-
-
-def _send_admin_invitation_email_sync(to_email: str) -> bool:
-    try:
-        gmail_user = os.getenv("GMAIL_USER")
-        gmail_password = os.getenv("GMAIL_APP_PASSWORD")
-
-        msg = MIMEMultipart()
-        msg['From'] = gmail_user
-        msg['To'] = to_email
-        msg['Subject'] = "You have been added as an Admin on CopodsConnect"
-
-        body = """
+    subject = "You have been added as an Admin on CopodsConnect"
+    body = """
 Hi there,
 
 You have been granted admin access to the CopodsConnect Admin Panel.
@@ -78,33 +73,13 @@ Click the link below to sign in with your Google account and access the admin pa
 Regards,
 The CopodsConnect Team
 """
-        msg.attach(MIMEText(body, 'plain'))
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(gmail_user, gmail_password)
-            server.sendmail(gmail_user, to_email, msg.as_string())
-
-        return True
-    except Exception:
-        return False
+    return await asyncio.to_thread(_send_email_via_ses, to_email, subject, body)
 
 
 async def send_promotion_email(to_email: str) -> bool:
     """Sends email when a user is promoted to Admin."""
-    return await asyncio.to_thread(_send_promotion_email_sync, to_email)
-
-
-def _send_promotion_email_sync(to_email: str) -> bool:
-    try:
-        gmail_user = os.getenv("GMAIL_USER")
-        gmail_password = os.getenv("GMAIL_APP_PASSWORD")
-
-        msg = MIMEMultipart()
-        msg['From'] = gmail_user
-        msg['To'] = to_email
-        msg['Subject'] = "You have been promoted to Admin on CopodsConnect"
-
-        body = """
+    subject = "You have been promoted to Admin on CopodsConnect"
+    body = """
 Hi there,
 
 Great news! You have been promoted to Admin on CopodsConnect.
@@ -120,33 +95,13 @@ Google account.
 Regards,
 The CopodsConnect Team
 """
-        msg.attach(MIMEText(body, 'plain'))
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(gmail_user, gmail_password)
-            server.sendmail(gmail_user, to_email, msg.as_string())
-
-        return True
-    except Exception:
-        return False
+    return await asyncio.to_thread(_send_email_via_ses, to_email, subject, body)
 
 
 async def send_demotion_email(to_email: str) -> bool:
     """Sends email when a user's admin access is removed (Member)."""
-    return await asyncio.to_thread(_send_demotion_email_sync, to_email)
-
-
-def _send_demotion_email_sync(to_email: str) -> bool:
-    try:
-        gmail_user = os.getenv("GMAIL_USER")
-        gmail_password = os.getenv("GMAIL_APP_PASSWORD")
-
-        msg = MIMEMultipart()
-        msg['From'] = gmail_user
-        msg['To'] = to_email
-        msg['Subject'] = "Your admin access on CopodsConnect has been updated"
-
-        body = """
+    subject = "Your admin access on CopodsConnect has been updated"
+    body = """
 Hi there,
 
 Your role on CopodsConnect has been updated. You are now a Member
@@ -159,34 +114,13 @@ You can continue to use the CopodsConnect app with your Google account.
 Regards,
 The CopodsConnect Team
 """
-        msg.attach(MIMEText(body, 'plain'))
+    return await asyncio.to_thread(_send_email_via_ses, to_email, subject, body)
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(gmail_user, gmail_password)
-            server.sendmail(gmail_user, to_email, msg.as_string())
-
-        return True
-    except Exception:
-        return False
 
 async def send_nsfw_alert_email(to_email: str, flagged_user_name: str, flagged_user_email: str, post_id: str) -> bool:
     """Sends alert email to an admin when a post is flagged for NSFW content."""
-    return await asyncio.to_thread(_send_nsfw_alert_email_sync, to_email, flagged_user_name, flagged_user_email, post_id)
-
-
-def _send_nsfw_alert_email_sync(to_email: str, flagged_user_name: str, flagged_user_email: str, post_id: str) -> bool:
-    try:
-        gmail_user = os.getenv("GMAIL_USER")
-        gmail_password = os.getenv("GMAIL_APP_PASSWORD")
-
-        
-
-        msg = MIMEMultipart()
-        msg['From'] = gmail_user
-        msg['To'] = to_email
-        msg['Subject'] = f"[CopodsConnect] NSFW Content Flagged for Review"
-
-        body = f"""
+    subject = "[CopodsConnect] NSFW Content Flagged for Review"
+    body = f"""
 Hi Admin,
 
 A post on CopodsConnect has been flagged for NSFW content by the moderation system.
@@ -200,12 +134,5 @@ Please log in to the admin panel to review this post and take action.
 Regards,
 CopodsConnect Moderation System
 """
-        msg.attach(MIMEText(body, 'plain'))
+    return await asyncio.to_thread(_send_email_via_ses, to_email, subject, body)
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(gmail_user, gmail_password)
-            server.sendmail(gmail_user, to_email, msg.as_string())
-
-        return True
-    except Exception:
-        return False

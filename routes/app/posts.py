@@ -1,5 +1,5 @@
 #routes/app/posts.py
-from fastapi import APIRouter, Depends, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, Query
 from typing import Optional
 
 from middlewares.auth import get_current_user, require_platform
@@ -29,11 +29,11 @@ posts_router = APIRouter(
 @posts_router.post("")
 async def create_post(
     body: CreatePostRequest,
-    background_tasks: BackgroundTasks,
     current_user=Depends(get_current_user),
 ):
-    result = await post_service.create_post(current_user, body, background_tasks)
+    result = await post_service.create_post(current_user, body)
     return api_response(201, result, "Post created successfully")
+
 
 
 @posts_router.get("")

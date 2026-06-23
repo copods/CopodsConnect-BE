@@ -29,5 +29,5 @@ async def purge_soft_deleted_users() -> None:
                 entity_id=user.id,
                 metadata={"email": user.email},
             )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"❌ Error purging users: {e}")
