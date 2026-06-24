@@ -25,6 +25,7 @@ from routes.app import auth as app_auth
 from routes.app.posts import posts_router
 from routes.alerts import alerts_router
 from routes.app.users import app_users_router
+from routes.stats import stats_router
 from utils.exceptions import (
     AppException,
     app_exception_handler,
@@ -102,7 +103,7 @@ app.include_router(appreciation_types_app_router, prefix=API_PREFIX)
 app.include_router(alerts_router, prefix=API_PREFIX)
 app.include_router(app_users_router, prefix=API_PREFIX)
 app.include_router(notifications_router, prefix=f"{API_PREFIX}/app")
-
+app.include_router(stats_router,prefix=API_PREFIX)
 # --- Health check ---
 @app.get("/health")
 async def health():

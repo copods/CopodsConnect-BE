@@ -237,16 +237,20 @@ async def resolve_alert(alert_id: str, action: AlertAction, resolved_by_id: str)
     )
 
     # ── Update content status ─────────────────────────────────
+    # If the new status is REMOVED, set deletedAt to now. If PUBLISHED (restored), set it back to None.
+    new_deleted_at = None if new_content_status == ContentStatus.PUBLISHED else now
+
     if alert.commentId:
         updated_content = await db.comment.update(
             where={"id": alert.commentId},
-            data={"status": new_content_status},
+            data={"status": new_content_status, "deletedAt": new_deleted_at},
         )
     else:
         updated_content = await db.post.update(
             where={"id": alert.postId},
-            data={"status": new_content_status},
+            data={"status": new_content_status, "deletedAt": new_deleted_at},
         )
+
 
     await write_audit_log(
         event_type=AuditEventType.ALERT_RESOLVED,

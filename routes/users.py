@@ -1,6 +1,8 @@
 # routes/users.py
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, Query
 from fastapi.responses import Response
+from fastapi.encoders import jsonable_encoder
+
 from middlewares.auth import require_admin, require_super_admin, require_platform
 from services import user_service
 from utils.ApiResponse import api_response
@@ -63,6 +65,11 @@ async def get_all_users(
 # ============================================================
 # INVITE USERS (admin + super_admin)
 # ============================================================
+
+@users_router.get("/{user_id}")
+async def get_user_by_id(user_id: str, admin: dict = Depends(require_admin)):
+    user = await user_service.get_user(user_id)
+    return api_response(200, jsonable_encoder(user), "User fetched")
 
 @users_router.post("/invite")
 async def invite_users(
@@ -267,3 +274,8 @@ async def edit_user(
     updates = body.model_dump(exclude_unset=True)
     result = await user_service.edit_user(current_user, user_id, updates)
     return api_response(200, result, "User updated successfully")
+
+@users_router.get("/{user_id}")
+async def get_user_by_id(user_id: str, admin: dict = Depends(require_admin)):
+    user = await user_service.get_user(user_id)
+    return api_response(200, user, "User fetched")

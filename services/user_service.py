@@ -18,6 +18,11 @@ from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
 
 BULK_INVITE_WORKSHEET_NAME = "Invitations"
 
+async def get_user(user_id: str):
+    user = await db.user.find_unique(where={"id": user_id})
+    if not user:
+        raise AppException(404, "User not found")
+    return user.model_dump()
 
 def _worksheet_for_bulk_invite(workbook: openpyxl.Workbook):
     if BULK_INVITE_WORKSHEET_NAME in workbook.sheetnames:
