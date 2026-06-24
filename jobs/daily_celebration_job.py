@@ -7,6 +7,8 @@ import logging
 from datetime import datetime
 from db.client import db
 from zoneinfo import ZoneInfo
+from services.audit_service import write_audit_log
+from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,9 @@ async def create_daily_celebration_posts() -> None:
         for user in birthday_users:
             user_id = user["id"]
             name = user["name"] or "a team member"
-            await db.post.create(
+
+            # Create the system post first — notifications reference its id
+            post = await db.post.create(
                 data={
                     "type": "SYSTEM_BIRTHDATE",
                     "caption": f"🎉 Happy Birthday, @{name}! Wishing you a fantastic day ahead! 🎂",
@@ -47,6 +51,30 @@ async def create_daily_celebration_posts() -> None:
                         "create": [{"taggedUserId": user_id}]
                     },
                 }
+            )
+
+            # Fetch all other active app users — their IDs go into metadata
+            # so the notification engine can fan out in one shot
+            peer_users = await db.user.find_many(
+                where={
+                    "deletedAt": None,
+                    "isBanned": False,
+                    "hasLoggedInApp": True,
+                    "id": {"not": user_id},
+                }
+            )
+            peer_ids = [p.id for p in peer_users]
+
+            await write_audit_log(
+                event_type=AuditEventType.SYSTEM_BIRTHDAY_POST_CREATED,
+                actor_type=AuditActorType.SYSTEM,
+                entity_type=AuditEntityType.POST,
+                entity_id=post.id,
+                metadata={
+                    "birthdayUserId": user_id,
+                    "personName": name,
+                    "peerRecipientIds": peer_ids,
+                },
             )
 
         # ── Work Anniversaries ─────────────────────────────────────────────────
@@ -70,7 +98,9 @@ async def create_daily_celebration_posts() -> None:
             name = user["name"] or "a team member"
             join_year = user.get("join_year")
             years = int(current_year - join_year) if join_year else 1
-            await db.post.create(
+
+            # Create the system post first — notifications reference its id
+            post = await db.post.create(
                 data={
                     "type": "SYSTEM_ANNIVERSARY",
                     "caption": (
@@ -82,6 +112,29 @@ async def create_daily_celebration_posts() -> None:
                         "create": [{"taggedUserId": user_id}]
                     },
                 }
+            )
+
+            peer_users = await db.user.find_many(
+                where={
+                    "deletedAt": None,
+                    "isBanned": False,
+                    "hasLoggedInApp": True,
+                    "id": {"not": user_id},
+                }
+            )
+            peer_ids = [p.id for p in peer_users]
+
+            await write_audit_log(
+                event_type=AuditEventType.SYSTEM_ANNIVERSARY_POST_CREATED,
+                actor_type=AuditActorType.SYSTEM,
+                entity_type=AuditEntityType.POST,
+                entity_id=post.id,
+                metadata={
+                    "anniversaryUserId": user_id,
+                    "personName": name,
+                    "yearsAtCompany": years,
+                    "peerRecipientIds": peer_ids,
+                },
             )
 
     except Exception as e:

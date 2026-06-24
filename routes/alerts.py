@@ -1,4 +1,5 @@
 # routes/alerts.py
+from models.schemas.alerts import AlertCommentOut
 import json
 from fastapi import APIRouter, Depends, Query
 from typing import Optional
@@ -28,20 +29,28 @@ alerts_router = APIRouter(
 )
 
 
-def _serialize_alert(alert) -> dict:
-    post = getattr(alert, "post", None)
+async def _serialize_alert(alert) -> dict:
+    post          = getattr(alert, "post", None)
+    comment       = getattr(alert, "comment", None)
     reported_user = getattr(alert, "reportedUser", None)
-    resolved_by = getattr(alert, "resolvedBy", None)
+    resolved_by   = getattr(alert, "resolvedBy", None)
+
+    prior_flag_count = await db.adminalert.count(
+        where={"reportedUserId": alert.reportedUserId}
+    )
 
     return AlertOut(
         id=alert.id,
         postId=alert.postId,
+        commentId=alert.commentId,
         reportedUserId=alert.reportedUserId,
         flagDetails=json.loads(alert.flagDetails) if alert.flagDetails else None,
+        flaggedPhrase=alert.flaggedPhrase,
         resolvedAction=alert.resolvedAction,
         resolvedAt=alert.resolvedAt,
         resolvedById=alert.resolvedById,
         createdAt=alert.createdAt,
+        priorFlagCount=prior_flag_count,
         post=AlertPostOut(
             id=post.id,
             caption=post.caption,
@@ -51,6 +60,11 @@ def _serialize_alert(alert) -> dict:
             createdAt=post.createdAt,
             media=[AlertPostMediaOut(url=m.url, order=m.order) for m in (getattr(post, "media", []) or [])],
         ) if post else None,
+        comment=AlertCommentOut(
+            id=comment.id,
+            body=comment.body,
+            createdAt=comment.createdAt,
+        ) if comment else None,
         reportedUser=AlertUserOut(
             id=reported_user.id,
             name=reported_user.name,
@@ -66,8 +80,10 @@ def _serialize_alert(alert) -> dict:
     ).model_dump(mode="json")
 
 
+
 ALERT_INCLUDE = {
     "post": {"include": {"media": {"order_by": {"order": "asc"}}}},
+    "comment": True,
     "reportedUser": True,
     "resolvedBy": True,
 }
@@ -76,7 +92,7 @@ ALERT_INCLUDE = {
 @alerts_router.get("")
 async def list_alerts(
     resolved: Optional[bool] = Query(default=None),
-    auto_removed: Optional[bool] = Query(default=None, alias="autoRemoved"),
+    # auto_removed: Optional[bool] = Query(default=None, alias="autoRemoved"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100, alias="pageSize"),
     current_user=Depends(require_admin),
@@ -85,17 +101,24 @@ async def list_alerts(
     List alerts.
     - No filters            → all alerts
     - resolved=false        → needs review (resolvedAction IS NULL)
-    - autoRemoved=true      → auto-removed log
+    # - autoRemoved=true      → auto-removed log
     - resolved=true         → admin-resolved (RESTORED or CONFIRMED_REMOVAL)
     """
     where: dict = {}
 
     if resolved is False:
         where["resolvedAction"] = None
-    elif auto_removed is True:
-        where["resolvedAction"] = AlertAction.AUTO_REMOVED
+    # elif auto_removed is True:
+    #     where["resolvedAction"] = AlertAction.AUTO_REMOVED
     elif resolved is True:
-        where["resolvedAction"] = {"in": [AlertAction.RESTORED, AlertAction.CONFIRMED_REMOVAL]}
+            where["resolvedAction"] = {"in": [
+            AlertAction.RESTORED,
+            AlertAction.CONFIRMED_REMOVAL,
+            AlertAction.BLACKLISTED,
+            AlertAction.WHITELISTED,
+            AlertAction.AUTO_REMOVED, # Include auto-removed so they appear in logs
+        ]}
+
 
     total = await db.adminalert.count(where=where)
     alerts = await db.adminalert.find_many(
@@ -106,8 +129,12 @@ async def list_alerts(
         take=page_size,
     )
 
+    serialized = []
+    for a in alerts:
+        serialized.append(await _serialize_alert(a))
+
     return api_response(200, AlertListResponse(
-        alerts=[_serialize_alert(a) for a in alerts],
+        alerts=serialized,
         total=total,
         page=page,
         pageSize=page_size,
@@ -127,7 +154,7 @@ async def get_alert(
     if not alert:
         raise AppException(404, "Alert not found")
 
-    return api_response(200, _serialize_alert(alert), "Alert fetched successfully")
+    return api_response(200, await _serialize_alert(alert), "Alert fetched successfully")
 
 
 @alerts_router.patch("/{alert_id}/resolve")
@@ -136,10 +163,13 @@ async def resolve_alert_route(
     body: ResolveAlertRequest,
     current_user=Depends(require_admin),
 ):
-    action = (
-        AlertAction.RESTORED if body.action == ResolveAlertAction.RESTORE
-        else AlertAction.CONFIRMED_REMOVAL
-    )
+    action_map = {
+        ResolveAlertAction.RESTORE:         AlertAction.RESTORED,
+        ResolveAlertAction.CONFIRM_REMOVAL: AlertAction.CONFIRMED_REMOVAL,
+        ResolveAlertAction.BLACKLIST:       AlertAction.BLACKLISTED,
+        ResolveAlertAction.WHITELIST:       AlertAction.WHITELISTED,
+    }
+    action = action_map[body.action]
 
     await resolve_alert(alert_id, action, current_user.id)
 

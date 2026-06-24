@@ -1,129 +1,346 @@
 # services/moderation_service.py
 import os
+import re
+import json
 import httpx
+import ahocorasick
+from better_profanity import profanity
 
-# OpenAI client kept for future use — currently using Mistral for text moderation
-# from openai import AsyncOpenAI
-# _openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from db.client import db
 
-# ── Sightengine (Image Moderation) ────────────────────────────
+# ── Sightengine ───────────────────────────────────────────────
 SIGHTENGINE_API_URL = "https://api.sightengine.com/1.0/check.json"
-SIGHTENGINE_USER = os.getenv("SIGHTENGINE_API_USER")
-SIGHTENGINE_SECRET = os.getenv("SIGHTENGINE_API_SECRET")
+SIGHTENGINE_USER    = os.getenv("SIGHTENGINE_API_USER")
+SIGHTENGINE_SECRET  = os.getenv("SIGHTENGINE_API_SECRET")
 
-# ── Mistral (Text Moderation) ─────────────────────────────────
-MISTRAL_API_URL = "https://api.mistral.ai/v1/moderations"
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+# ── Mistral ───────────────────────────────────────────────────
+MISTRAL_CHAT_URL = "https://api.mistral.ai/v1/chat/completions"
+MISTRAL_API_KEY  = os.getenv("MISTRAL_API_KEY")
+MISTRAL_MODEL    = "mistral-small-2506"   # pinned — do NOT change to "latest"
 
-# async def scan_text(text: str) -> tuple[float, str | None]:
-#     """
-#     Returns (score, category) where score is 0.0–1.0.
-#     score = highest flagged category score from OpenAI moderation.
-#     """
-#     if not text or not text.strip():
-#         return 0.0, None
+# ── Whitelist threshold ───────────────────────────────────────
+# AI confidence < this → whitelist overrides (auto-publish).
+# AI confidence >= this → still route to admin even if whitelisted.
+WHITELIST_AUTO_PUBLISH_CONFIDENCE_CEILING = 0.75
 
-#     response = await _openai_client.moderations.create(input=text)
-#     result = response.results[0]
 
-#     if not result.flagged:
-#         # Even if not flagged, return the highest score so thresholds work
-#         scores = result.category_scores.model_dump()
-#         top_category = max(scores, key=scores.get)
-#         return scores[top_category], None
+# ══════════════════════════════════════════════════════════════
+# SECTION 1 — NORMALIZERS (keep separate — different purposes)
+# ══════════════════════════════════════════════════════════════
 
-#     scores = result.category_scores.model_dump()
-#     top_category = max(scores, key=scores.get)
-#     return scores[top_category], top_category
+LEET_MAP = {
+    '@': 'a', '4': 'a',
+    '3': 'e',
+    '1': 'i', '!': 'i',
+    '0': 'o',
+    '$': 's', '5': 's',
+    '7': 't',
+}
 
-# ── Text Scan ─────────────────────────────────────────────────
+def _apply_leet_map(text: str) -> str:
+    return ''.join(LEET_MAP.get(c, c) for c in text)
 
-async def scan_text(text: str) -> tuple[float, str | None]:
+
+def boundary_preserving_normalize(text: str) -> str:
     """
-    Returns (score, category) where score is 0.0–1.0.
-    Uses Mistral moderation API — free, no billing required.
+    For Automaton A (single words).
+    Lowercases + leet-maps, then collapses letter-by-letter evasion
+    ("k i l l" → "kill") WITHOUT destroying real word boundaries.
+    "watched a documentary" stays as three separate tokens.
+    """
+    text = text.lower()
+    text = _apply_leet_map(text)
+    # Collapse separator-only runs between individual single characters
+    text = re.sub(
+        r'\b(\w)(?:[\s._\-]+(\w)\b)+',
+        lambda m: re.sub(r'[\s._\-]+', '', m.group(0)),
+        text,
+    )
+    return text
 
-    Kept below for reference if switching back to OpenAI moderation:
-    ----------------------------------------------------------------
-    # response = await _openai_client.moderations.create(input=text)
-    # result = response.results[0]
-    # if not result.flagged:
-    #     scores = result.category_scores.model_dump()
-    #     top_category = max(scores, key=scores.get)
-    #     return scores[top_category], None
-    # scores = result.category_scores.model_dump()
-    # top_category = max(scores, key=scores.get)
-    # return scores[top_category], top_category
-    ----------------------------------------------------------------
+
+def squish_normalize(text: str) -> str:
+    """
+    For Automaton B (multi-word phrases) and normalizedKey dedup in DB.
+    Strips ALL whitespace/punctuation + applies leet map.
+    Safe for phrases — a squished multi-word phrase won't accidentally
+    appear as a substring inside an unrelated word.
+    """
+    text = text.lower()
+    text = _apply_leet_map(text)
+    text = re.sub(r'[^a-z0-9]', '', text)
+    return text
+
+
+# ══════════════════════════════════════════════════════════════
+# SECTION 2 — AUTOMATON CACHE
+# ══════════════════════════════════════════════════════════════
+
+_automaton_a: ahocorasick.Automaton | None = None   # single words, boundary-preserving
+_automaton_b: ahocorasick.Automaton | None = None   # phrases, squished
+
+
+async def _rebuild_automatons() -> None:
+    """Fetches all blacklist entries from DB and rebuilds both automata."""
+    global _automaton_a, _automaton_b
+
+    rows = await db.moderationblacklist.find_many()
+
+    new_a = ahocorasick.Automaton()
+    new_b = ahocorasick.Automaton()
+
+    for row in rows:
+        raw = row.rawPhrase
+        if ' ' in raw.strip():
+            key = squish_normalize(raw)
+            new_b.add_word(key, key)
+        else:
+            key = boundary_preserving_normalize(raw)
+            new_a.add_word(key, key)
+
+    if len(new_a) > 0:
+        new_a.make_automaton()
+    if len(new_b) > 0:
+        new_b.make_automaton()
+
+    _automaton_a = new_a
+    _automaton_b = new_b
+
+
+async def invalidate_blacklist_cache() -> None:
+    """Call immediately after any insert/delete on ModerationBlacklist."""
+    await _rebuild_automatons()
+
+
+# ══════════════════════════════════════════════════════════════
+# SECTION 3 — STATIC PROFANITY FILTER (better-profanity)
+# ══════════════════════════════════════════════════════════════
+
+async def reload_static_filter() -> None:
+    """
+    Loads better-profanity with current ModerationWhitelist so whitelisted
+    words are suppressed in the static library too.
+    Call at startup and after any ModerationWhitelist change.
+    """
+    rows = await db.moderationwhitelist.find_many()
+    whitelist_words: list[str] = []
+    for row in rows:
+        whitelist_words.extend(row.rawPhrase.lower().split())
+    profanity.load_censor_words(whitelist_words=whitelist_words)
+
+
+def check_static_profanity(text: str) -> str | None:
+    """
+    Returns the first matched word, or None.
+    Diffs original vs censored to recover the actual matched word
+    (better-profanity's API only exposes a bool directly).
+    """
+    if not profanity.contains_profanity(text):
+        return None
+    censored = profanity.censor(text, '×')
+    for orig, cens in zip(text.split(), censored.split()):
+        if orig != cens:
+            return orig
+    return None
+
+
+# ══════════════════════════════════════════════════════════════
+# SECTION 4 — BOUNDARY CHECK (Automaton A only)
+# ══════════════════════════════════════════════════════════════
+
+def _is_word_char(c: str) -> bool:
+    return c.isalnum()
+
+
+def _find_boundary_safe_matches(automaton: ahocorasick.Automaton, normalized_text: str):
+    """
+    Yields Automaton A matches only when they sit at a real word boundary.
+    Do NOT use this on Automaton B — squish_normalize already destroyed boundary info.
+    """
+    for end_idx, phrase in automaton.iter(normalized_text):
+        start_idx = end_idx - len(phrase) + 1
+        before_ok = (start_idx == 0) or not _is_word_char(normalized_text[start_idx - 1])
+        after_ok  = (end_idx + 1 == len(normalized_text)) or not _is_word_char(normalized_text[end_idx + 1])
+        if before_ok and after_ok:
+            yield phrase
+
+
+# ══════════════════════════════════════════════════════════════
+# SECTION 5 — COMBINED BLACKLIST CHECK
+# ══════════════════════════════════════════════════════════════
+
+async def check_blacklist(raw_text: str) -> str | None:
+    """
+    Runs all three static layers. Returns first hit (word/phrase) or None.
+    Order: better-profanity → Automaton A (words) → Automaton B (phrases).
+    """
+    if _automaton_a is None or _automaton_b is None:
+        await _rebuild_automatons()
+
+    # Layer A0 — static library
+    static_hit = check_static_profanity(raw_text)
+    if static_hit:
+        return static_hit
+
+    # Layer A — custom single-word automaton, boundary-safe
+    if len(_automaton_a) > 0:
+        normalized_a = boundary_preserving_normalize(raw_text)
+        for match in _find_boundary_safe_matches(_automaton_a, normalized_a):
+            return match
+
+    # Layer B — custom phrase automaton, squished
+    if len(_automaton_b) > 0:
+        normalized_b = squish_normalize(raw_text)
+        for _end_idx, phrase in _automaton_b.iter(normalized_b):
+            return phrase
+
+    return None
+
+
+# ══════════════════════════════════════════════════════════════
+# SECTION 6 — WHITELIST CHECK (runs AFTER AI flags something)
+# ══════════════════════════════════════════════════════════════
+
+async def check_whitelist(flagged_phrase: str | None, ai_confidence: float) -> str:
+    """
+    Returns:
+      "auto_publish"    — whitelisted + low confidence → safe to publish
+      "queue_with_note" — whitelisted + high confidence → admin reviews with context note
+      "queue_normal"    — not whitelisted → normal flag flow
+    """
+    if not flagged_phrase:
+        return "queue_normal"
+
+    key = (
+        squish_normalize(flagged_phrase)
+        if ' ' in flagged_phrase.strip()
+        else boundary_preserving_normalize(flagged_phrase)
+    )
+
+    entry = await db.moderationwhitelist.find_first(where={"normalizedKey": key})
+    if not entry:
+        return "queue_normal"
+
+    if ai_confidence < WHITELIST_AUTO_PUBLISH_CONFIDENCE_CEILING:
+        return "auto_publish"
+
+    return "queue_with_note"
+
+
+# ══════════════════════════════════════════════════════════════
+# SECTION 7 — AI SCANS
+# ══════════════════════════════════════════════════════════════
+
+_MODERATION_SYSTEM_PROMPT = """\
+You are a strict content moderation assistant for a professional workplace social platform.
+Analyze the text and determine if it violates community standards.
+
+Violations include: explicit violence or threats, sexual content, hate speech, harassment,
+severe profanity, or content clearly inappropriate in a professional workplace.
+
+Be context-aware: "You killed it!" is a compliment — not a violation.
+"I want to kill my boss" IS a violation even if likely hyperbolic in a workplace context.
+
+Return ONLY valid JSON matching the schema exactly. No markdown, no explanation.
+"""
+
+_MODERATION_JSON_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "moderation_result",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "is_flagged":     {"type": "boolean"},
+                "flagged_phrase": {"type": ["string", "null"]},
+                "category": {
+                    "type": ["string", "null"],
+                    "enum": ["violence", "sexual", "hate", "harassment", "profanity", "other", None],
+                },
+                "confidence": {"type": "number"},
+            },
+            "required": ["is_flagged", "flagged_phrase", "category", "confidence"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def scan_text(text: str) -> tuple[float, str | None, str | None, float]:
+    """
+    Returns (score, category, flagged_phrase, confidence).
+    score = 0.0 if not flagged, else = confidence.
+    Raises on any API error — caller handles (no silent fallback).
     """
     if not text or not text.strip():
-        return 0.0, None
+        return 0.0, None, None, 0.0
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=None) as client:   # no timeout — wait as long as needed
         resp = await client.post(
-            MISTRAL_API_URL,
+            MISTRAL_CHAT_URL,
             headers={
                 "Authorization": f"Bearer {MISTRAL_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json={"model": "mistral-moderation-latest", "input": text},
+            json={
+                "model": MISTRAL_MODEL,
+                "response_format": _MODERATION_JSON_SCHEMA,
+                "messages": [
+                    {"role": "system", "content": _MODERATION_SYSTEM_PROMPT},
+                    {"role": "user",   "content": text},
+                ],
+            },
         )
         resp.raise_for_status()
         data = resp.json()
 
-    result = data["results"][0]
-    categories = result["category_scores"]
-    top_category = max(categories, key=categories.get)
-    top_score = categories[top_category]
+    result = json.loads(data["choices"][0]["message"]["content"])
 
-    flagged = any(result["categories"].values())
-    return top_score, top_category if flagged else None
+    if not result["is_flagged"]:
+        return 0.0, None, None, result.get("confidence", 0.0)
 
+    confidence = result.get("confidence", 0.0)
+    return confidence, result.get("category"), result.get("flagged_phrase"), confidence
 
-# ── Image Scan ────────────────────────────────────────────────
 
 async def scan_images(image_urls: list[str]) -> tuple[float, str | None]:
     """
-    Returns (score, reason) where score is the highest nudity/offensive score
-    across all images. Uses Sightengine REST API — 2000 free calls/month.
+    Returns (score, reason).
+    Raises on any API error — caller handles.
     """
     if not image_urls:
         return 0.0, None
 
-    highest_score = 0.0
+    highest_score  = 0.0
     highest_reason = None
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=None) as client:   # no timeout
         for url in image_urls:
             resp = await client.get(
                 SIGHTENGINE_API_URL,
                 params={
-                    "url": url,
-                    "models": "nudity-2.0,offensive",
-                    "api_user": SIGHTENGINE_USER,
+                    "url":        url,
+                    "models":     "nudity-2.0,offensive",
+                    "api_user":   SIGHTENGINE_USER,
                     "api_secret": SIGHTENGINE_SECRET,
                 },
             )
             resp.raise_for_status()
             data = resp.json()
 
-            # Nudity score — worst case across sexual_activity, sexual_display, erotica
             nudity = data.get("nudity", {})
             nudity_score = max(
                 nudity.get("sexual_activity", 0.0),
                 nudity.get("sexual_display", 0.0),
                 nudity.get("erotica", 0.0),
             )
-
-            # Offensive score
-            offensive = data.get("offensive", {})
-            offensive_score = offensive.get("prob", 0.0)
-
-            score = max(nudity_score, offensive_score)
+            offensive_score = data.get("offensive", {}).get("prob", 0.0)
+            score  = max(nudity_score, offensive_score)
             reason = "nudity" if nudity_score >= offensive_score else "offensive"
 
             if score > highest_score:
-                highest_score = score
+                highest_score  = score
                 highest_reason = reason
 
     return highest_score, highest_reason

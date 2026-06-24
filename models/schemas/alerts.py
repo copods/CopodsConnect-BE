@@ -9,8 +9,11 @@ from enum import Enum
 # ── Request DTOs (IN) ─────────────────────────────────────────
 
 class ResolveAlertAction(str, Enum):
-    RESTORE = "restore"
+    RESTORE         = "restore"
     CONFIRM_REMOVAL = "confirm_removal"
+    BLACKLIST       = "blacklist"
+    WHITELIST       = "whitelist"
+
 
 
 class ResolveAlertRequest(BaseModel):
@@ -55,23 +58,33 @@ class AlertResolvedByOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+class AlertCommentOut(BaseModel):
+    id: str
+    body: str
+    createdAt: datetime
+    model_config = {"from_attributes": True}
 
 # ── Main alert response DTO (OUT) ─────────────────────────────
 
 class AlertOut(BaseModel):
     id: str
     postId: str
+    commentId: Optional[str] = None
     reportedUserId: str
     flagDetails: Optional[dict]
+    flaggedPhrase: Optional[str] = None      # exact word/phrase the static layer or AI caught
     resolvedAction: Optional[AlertAction]
     resolvedAt: Optional[datetime]
     resolvedById: Optional[str]
     createdAt: datetime
     post: Optional[AlertPostOut]
+    comment: Optional[AlertCommentOut] = None
     reportedUser: Optional[AlertUserOut]
     resolvedBy: Optional[AlertResolvedByOut]
+    priorFlagCount: int = 0                  # how many times user was flagged — display only
 
     model_config = {"from_attributes": True}
+
 
 
 class AlertListResponse(BaseModel):

@@ -1,6 +1,7 @@
 # services/user_service.py
 import asyncio
 import io
+import json
 import math
 import re
 import openpyxl
@@ -12,6 +13,8 @@ from prisma.enums import Role
 from utils.exceptions import AppException
 from utils.email import send_invitation_email, send_admin_invitation_email, send_promotion_email, send_demotion_email
 from constants import ALLOWED_EMAIL_DOMAIN, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from services.audit_service import write_audit_log
+from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
 
 BULK_INVITE_WORKSHEET_NAME = "Invitations"
 
@@ -92,26 +95,43 @@ def derive_panel_status(user) -> str:
     return "ACTIVE"
 
 
-def serialize_user(u) -> dict:
-    return {
-        "id": u.id,
-        "email": u.email,
-        "name": u.name,
-        "picture": u.picture,
-        "designation": u.designation,
-        "dateOfJoining": u.dateOfJoining.isoformat() if u.dateOfJoining else None,
-        "birthdate": u.birthdate.isoformat() if u.birthdate else None,
+# 1. Update serialize_user to accept an active_alert parameter
+def serialize_user(u, active_alert=None)->dict:
+    data = {
+        "id":u.id,
+        "email":u.email,
+        "name":u.name,
+        "picture":u.picture,
+        "designation":u.designation,
+        "dateOfJoining":u.dateOfJoining.isoformat() if u.dateOfJoining else None,
+        "birthdate":u.birthdate.isoformat() if u.birthdate else None, 
         "role": str(u.role),
         "appStatus": derive_app_status(u),
-        "panelStatus": derive_panel_status(u),
-        "isBanned": u.isBanned,
-        "bannedUntil": u.bannedUntil.isoformat() if u.bannedUntil else None,
-        "banReason": u.banReason,
-        "hasLoggedInApp": u.hasLoggedInApp,
-        "hasLoggedInPanel": u.hasLoggedInPanel,
+        "panelStatus":derive_panel_status(u),
+        "isBanned":u.isBanned,
+        "bannedUntil": u.bannedUntil.isoformat() if u.bannedUntil else None, 
+        "banReason":u.banReason,
+        "hasLoggedInApp":u.hasLoggedInApp,
+        "hasLoggedInPanel":u.hasLoggedInPanel,
         "createdAt": u.createdAt.isoformat(),
-        "deletedAt": u.deletedAt.isoformat() if u.deletedAt else None,
+        "deletedAt":u.deletedAt.isoformat() if u.deletedAt else None,
     }
+    # Attach activeAlert if passed 
+    if active_alert:
+        reason = None
+        if active_alert.flagDetails:
+            try: 
+                details = json.loads(active_alert.flagDetails)
+                reason = details.get("reason")
+            except Exception:
+                pass 
+        
+        data["activeAlert"] = {
+            "id":active_alert.id,
+            "reason": reason or active_alert.flaggedPhrase or "Flagged content"
+        }
+
+    return data
 
 
 async def serialize_user_with_counts(u) -> dict:
@@ -171,6 +191,13 @@ async def _batch_invite_create(
         for create_data in to_create:
             invited.append({"email": create_data["email"]})
             emails_to_send.append(create_data["email"])
+            await write_audit_log(
+                event_type=AuditEventType.USER_INVITED,
+                actor_type=AuditActorType.ADMIN,
+                entity_type=AuditEntityType.INVITATION,
+                entity_id=create_data["email"],
+                metadata={"email": create_data["email"], "role": str(create_data.get("role", "MEMBER"))},
+            )
 
     return invited, emails_to_send
 
@@ -363,6 +390,14 @@ async def resend_invite(emails: list) -> dict:
         else:
             await send_invitation_email(email)
 
+        await write_audit_log(
+            event_type=AuditEventType.USER_INVITATION_RESENT,
+            actor_type=AuditActorType.ADMIN,
+            entity_type=AuditEntityType.INVITATION,
+            entity_id=email,
+            metadata={"email": email, "role": str(user.role)},
+        )
+
         sent.append({"email": email})
 
     return {
@@ -401,6 +436,13 @@ async def delete_user(current_user, target_user_id: str) -> dict:
         where={"id": target_user_id},
         data={"deletedAt": now}
     )
+    await write_audit_log(
+        event_type=AuditEventType.USER_SOFT_DELETED,
+        actor_type=AuditActorType.ADMIN,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={"deletedBy": current_user.id},
+    )
     return {"deletedUserId": target_user_id}
 
 
@@ -430,6 +472,13 @@ async def bulk_delete_users(current_user, user_ids: list) -> dict:
             where={"id": user_id},
             data={"deletedAt": now}
         )
+        await write_audit_log(
+            event_type=AuditEventType.USER_SOFT_DELETED,
+            actor_type=AuditActorType.ADMIN,
+            entity_type=AuditEntityType.USER,
+            entity_id=user_id,
+            metadata={"deletedBy": current_user.id},
+        )
         deleted.append({"userId": user_id})
 
     return {"deleted": deleted, "skipped": skipped}
@@ -456,6 +505,13 @@ async def restore_user(current_user, target_user_id: str) -> dict:
     restored_user = await db.user.update(
         where={"id": target_user_id},
         data={"deletedAt": None}
+    )
+    await write_audit_log(
+        event_type=AuditEventType.USER_RESTORED,
+        actor_type=AuditActorType.ADMIN,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={"restoredBy": current_user.id},
     )
     return serialize_user(restored_user)
 
@@ -499,6 +555,20 @@ async def ban_user(current_user, target_user_id: str, duration_hours: int, reaso
         }
     )
 
+    await write_audit_log(
+        event_type=AuditEventType.USER_BANNED,
+        actor_type=AuditActorType.ADMIN,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={
+            "bannedBy": current_user.id,
+            "durationHours": duration_hours,
+            "reason": reason,
+            "bannedUntil": banned_until.isoformat(),
+        },
+    )
+
     return {
         "userId": updated_user.id,
         "isBanned": updated_user.isBanned,
@@ -535,6 +605,19 @@ async def edit_ban(current_user, target_user_id: str, duration_hours: int, ban_u
         data=update_data
     )
 
+    await write_audit_log(
+        event_type=AuditEventType.USER_BAN_UPDATED,
+        actor_type=AuditActorType.ADMIN,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={
+            "updatedBy": current_user.id,
+            "newDurationHours": duration_hours,
+            "bannedUntil": updated_user.bannedUntil.isoformat(),
+        },
+    )
+
     return {
         "userId": updated_user.id,
         "isBanned": updated_user.isBanned,
@@ -564,6 +647,15 @@ async def unban_user(current_user, target_user_id: str) -> dict:
             "bannedUntil": None,
             "banReason": None,
         }
+    )
+
+    await write_audit_log(
+        event_type=AuditEventType.USER_UNBANNED_MANUAL,
+        actor_type=AuditActorType.ADMIN,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={"unbannedBy": current_user.id},
     )
 
     return {"userId": target_user_id, "isBanned": False}
@@ -606,6 +698,15 @@ async def change_role(current_user, target_user_id: str, new_role: str) -> dict:
     elif new_role == "MEMBER":
         await send_demotion_email(updated_user.email)
 
+    await write_audit_log(
+        event_type=AuditEventType.USER_ROLE_CHANGED,
+        actor_type=AuditActorType.ADMIN,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={"changedBy": current_user.id, "newRole": new_role},
+    )
+
     return {
         "userId": updated_user.id,
         "role": str(updated_user.role)
@@ -647,6 +748,15 @@ async def edit_user(current_user, target_user_id: str, updates: dict) -> dict:
         data=update_data
     )
 
+    await write_audit_log(
+        event_type=AuditEventType.USER_PROFILE_UPDATED,
+        actor_type=AuditActorType.ADMIN,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.USER,
+        entity_id=target_user_id,
+        metadata={"updatedBy": current_user.id, "fields": list(update_data.keys())},
+    )
+
     return serialize_user(updated_user)
 
 
@@ -667,6 +777,7 @@ async def get_all_users(
     role: str = None,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
+    exclude_id: str = None,
 ) -> dict:
     if status is not None and status not in VALID_LIST_STATUSES:
         raise AppException(
@@ -681,6 +792,10 @@ async def get_all_users(
 
     # Always start with deletedAt filter
     where: dict = {}
+
+    # Exclude the currently logged-in admin from their own list
+    if exclude_id:
+        where["id"] = {"not": exclude_id}
 
     if status == "DELETED":
         where["deletedAt"] = {"not": None}
@@ -728,8 +843,28 @@ async def get_all_users(
 
     total_pages = math.ceil(total / page_size) if total else 0
 
+    # NEW: Fetch active alerts for the retrieved users
+    user_ids = [u.id for u in users]
+    active_alerts =[]
+    if user_ids:
+        active_alerts = await db.adminalert.find_many(
+            where={
+                "reportedUserId": {"in":user_ids},
+                "resolvedAction":None
+            },
+            order={"createdAt":"desc"}
+        )
+    
+    #Map user_id to their most recent active alert 
+    alerts_by_user ={}
+    for a in active_alerts:
+        if a.reportedUserId not in alerts_by_user:
+            alerts_by_user[a.reportedUserId]= a
+        
+    total_pages = math.ceil(total/page_size) if total else 0 
+
     return {
-        "users": [serialize_user(u) for u in users],
+        "users": [serialize_user(u,active_alert=alerts_by_user.get(u.id)) for u in users ],
         "total": total,
         "page": page,
         "pageSize": page_size,

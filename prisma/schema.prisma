@@ -1,4 +1,3 @@
-//prisma schema.prisma 
 datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
@@ -43,16 +42,23 @@ model User {
   updatedAt        DateTime  @updatedAt @map("updated_at")
   deletedAt        DateTime? @map("deleted_at")
 
-  // Relations — not DB columns, Prisma navigation only 
-  authoredPosts Post[]    @relation("PostAuthor")
-  taggedInPosts PostTag[] @relation("TaggedInPosts")
-  taggedInComments CommentTag[] @relation("TaggedInComments")
-  likes         Like[]    @relation("UserLikes")
-  comments      Comment[] @relation("CommentAuthor")
+  // Relations — not DB columns, Prisma navigation only
+  authoredPosts         Post[]                  @relation("PostAuthor")
+  taggedInPosts         PostTag[]               @relation("TaggedInPosts")
+  taggedInComments      CommentTag[]            @relation("TaggedInComments")
+  likes                 Like[]                  @relation("UserLikes")
+  comments              Comment[]               @relation("CommentAuthor")
   sentAppreciations     Appreciation[]          @relation("SentAppreciations")
   receivedAppreciations AppreciationRecipient[] @relation("ReceivedAppreciations")
-  reportedAlerts AdminAlert[] @relation("ReportedInAlerts")
-  resolvedAlerts AdminAlert[] @relation("AlertsResolvedBy")
+  reportedAlerts        AdminAlert[]            @relation("ReportedInAlerts")
+  resolvedAlerts        AdminAlert[]            @relation("AlertsResolvedBy")
+  blacklistEntries      ModerationBlacklist[]   @relation("BlacklistAddedBy")
+  whitelistEntries      ModerationWhitelist[]   @relation("WhitelistAddedBy")
+
+  // Every audit log row where this user was the actor (actorType USER or ADMIN)
+  auditLogs     AuditLog[]         @relation("AuditActor")
+  // This user's personal notification inbox — fan-out rows pointing back to audit_logs
+  notifications UserNotification[] @relation("NotificationFeed")
 
   @@index([deletedAt])
   @@index([isBanned])
@@ -79,59 +85,57 @@ enum PostType {
 
 // Applies to both Post and Comment
 enum ContentStatus {
-  PENDING_SCAN  // just created, awaiting moderation check
-  PUBLISHED     // passed moderation, visible in feed
-  FLAGGED       // failed moderation, hidden from feed
-  REMOVED       // hidden from feed — either user deleted their own post (flagReason = NORMAL) or system/admin removed it for policy violation (flagReason = NSFW_*)
+  PENDING_SCAN // just created, awaiting moderation check
+  PUBLISHED // passed moderation, visible in feed
+  FLAGGED // failed moderation, hidden from feed
+  REMOVED // hidden from feed — either user deleted their own post (flagReason = NORMAL) or system/admin removed it for policy violation (flagReason = NSFW_*)
 }
 
 // Reason a Post or Comment was flagged
 enum FlagReason {
-  NSFW_TEXT     // caption or comment body failed text moderation
-  NSFW_IMAGE    // one or more images in the post failed image moderation
-  UNSAFE_LINK   // caption contains a link that failed safety check
-  NORMAL        // user deleted their own content — no policy violation
+  NSFW_TEXT // caption or comment body failed text moderation
+  NSFW_IMAGE // one or more images in the post failed image moderation
+  UNSAFE_LINK // caption contains a link that failed safety check
+  NORMAL // user deleted their own content — no policy violation
 }
 
 // ============================================================
 // FEED MODELS
 // ============================================================
 
-
 model Post {
   id         String        @id @default(cuid())
   type       PostType      @default(USER_POST)
   authorId   String?       @map("author_id")
-  caption    String?       // supports markdown
+  caption    String?
   status     ContentStatus @default(PENDING_SCAN)
-  sourceUrl  String?       @map("source_url")  // populated for LINKEDIN_IMPORT only
-  flagReason FlagReason?   @map("flag_reason") // null until moderation runs
-  flaggedAt  DateTime?     @map("flagged_at")  // null unless status = FLAGGED or REMOVED
-  deletedAt  DateTime?     @map("deleted_at")  // timestamp used by purge job for 30-day hard delete window
+  sourceUrl  String?       @map("source_url")
+  flagReason FlagReason?   @map("flag_reason")
+  flaggedAt  DateTime?     @map("flagged_at")
+  deletedAt  DateTime?     @map("deleted_at")
   createdAt  DateTime      @default(now()) @map("created_at")
   updatedAt  DateTime      @updatedAt @map("updated_at")
   captionEditedAt DateTime? @map("caption_edited_at") // set only on author caption edit
 
-  // Relations
-  author   User?       @relation("PostAuthor", fields: [authorId], references: [id])
+  author   User?        @relation("PostAuthor", fields: [authorId], references: [id], onDelete: Cascade)
   media    PostMedia[]
   tags     PostTag[]
   likes    Like[]
   comments Comment[]
-  alerts AdminAlert[]
+  alerts   AdminAlert[]
 
-  @@index([status, deletedAt, createdAt(sort: Desc)]) // primary feed query index
-  @@index([authorId, status, deletedAt])              // "my posts" query
-  @@index([type, deletedAt])                          // filter by post type
+  @@index([status, deletedAt, createdAt(sort: Desc)])
+  @@index([authorId, status, deletedAt])
+  @@index([type, deletedAt])
   @@map("posts")
 }
 
 model PostMedia {
   id        String   @id @default(cuid())
   postId    String   @map("post_id")
-  url       String                        // Supabase Storage URL
-  order     Int                           // carousel position, 0-indexed
-  altText   String?  @map("alt_text")    // accessibility text
+  url       String
+  order     Int
+  altText   String?  @map("alt_text")
   createdAt DateTime @default(now()) @map("created_at")
 
   post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
@@ -147,9 +151,9 @@ model PostTag {
   createdAt    DateTime @default(now()) @map("created_at")
 
   post       Post @relation(fields: [postId], references: [id], onDelete: Cascade)
-  taggedUser User @relation("TaggedInPosts", fields: [taggedUserId], references: [id])
+  taggedUser User @relation("TaggedInPosts", fields: [taggedUserId], references: [id], onDelete: Cascade)
 
-  @@unique([postId, taggedUserId]) // same user cannot be tagged twice on the same post
+  @@unique([postId, taggedUserId])
   @@index([taggedUserId])
   @@map("post_tags")
 }
@@ -161,9 +165,9 @@ model Like {
   createdAt DateTime @default(now()) @map("created_at")
 
   post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
-  user User @relation("UserLikes", fields: [userId], references: [id])
+  user User @relation("UserLikes", fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([postId, userId]) // one like per user per post, enforced at DB level
+  @@unique([postId, userId])
   @@index([postId])
   @@index([userId])
   @@map("likes")
@@ -173,23 +177,24 @@ model Comment {
   id         String        @id @default(cuid())
   postId     String        @map("post_id")
   authorId   String        @map("author_id")
-  parentId   String?       @map("parent_id")   // null = top-level, set = reply (max depth 1)
+  parentId   String?       @map("parent_id")
   body       String
   status     ContentStatus @default(PENDING_SCAN)
-  flagReason FlagReason?   @map("flag_reason") // null until moderation runs
-  flaggedAt  DateTime?     @map("flagged_at")  // null unless status = FLAGGED or REMOVED
-  deletedAt  DateTime?     @map("deleted_at")  // timestamp used by purge job for 30-day hard delete window
+  flagReason FlagReason?   @map("flag_reason")
+  flaggedAt  DateTime?     @map("flagged_at")
+  deletedAt  DateTime?     @map("deleted_at")
   createdAt  DateTime      @default(now()) @map("created_at")
   updatedAt  DateTime      @updatedAt @map("updated_at")
 
-  post    Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
-  author  User      @relation("CommentAuthor", fields: [authorId], references: [id])
-  parent  Comment?  @relation("CommentReplies", fields: [parentId], references: [id])
-  replies Comment[] @relation("CommentReplies")
-  tags CommentTag[]
+  post    Post         @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author  User         @relation("CommentAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  parent  Comment?     @relation("CommentReplies", fields: [parentId], references: [id])
+  replies Comment[]    @relation("CommentReplies")
+  tags    CommentTag[]
+  alerts  AdminAlert[]
 
-  @@index([postId, status, deletedAt]) // fetch comments for a post
-  @@index([authorId, status])          // "my comments" query
+  @@index([postId, status, deletedAt])
+  @@index([authorId, status])
   @@map("comments")
 }
 
@@ -200,9 +205,9 @@ model CommentTag {
   createdAt    DateTime @default(now()) @map("created_at")
 
   comment    Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
-  taggedUser User    @relation("TaggedInComments", fields: [taggedUserId], references: [id])
+  taggedUser User    @relation("TaggedInComments", fields: [taggedUserId], references: [id], onDelete: Cascade)
 
-  @@unique([commentId, taggedUserId]) // same user cannot be tagged twice in the same comment
+  @@unique([commentId, taggedUserId])
   @@index([taggedUserId])
   @@map("comment_tags")
 }
@@ -217,9 +222,9 @@ model AppreciationType {
   emojiPath    String   @map("emoji_path")
   description  String?
   isActive     Boolean  @default(true) @map("is_active")
-  displayOrder Int      @default(0)    @map("display_order")
+  displayOrder Int      @default(0) @map("display_order")
   createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt      @map("updated_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   appreciations Appreciation[]
 
@@ -233,9 +238,9 @@ model Appreciation {
   message            String?
   deletedAt          DateTime? @map("deleted_at")
   createdAt          DateTime  @default(now()) @map("created_at")
-  updatedAt          DateTime  @updatedAt      @map("updated_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
-  sender           User                    @relation("SentAppreciations", fields: [senderId], references: [id])
+  sender           User                    @relation("SentAppreciations", fields: [senderId], references: [id], onDelete: Cascade)
   appreciationType AppreciationType        @relation(fields: [appreciationTypeId], references: [id])
   recipients       AppreciationRecipient[]
 
@@ -251,8 +256,8 @@ model AppreciationRecipient {
   seenAt         DateTime? @map("seen_at")
   createdAt      DateTime  @default(now()) @map("created_at")
 
-  appreciation Appreciation @relation(fields: [appreciationId], references: [id])
-  user         User         @relation("ReceivedAppreciations", fields: [userId], references: [id])
+  appreciation Appreciation @relation(fields: [appreciationId], references: [id], onDelete:Cascade)
+  user         User         @relation("ReceivedAppreciations", fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([appreciationId, userId])
   @@index([userId])
@@ -263,9 +268,11 @@ model AppreciationRecipient {
 // ENUMS
 // ============================================================
 enum AlertAction {
-  RESTORED           // admin restored post to PUBLISHED
-  CONFIRMED_REMOVAL  // admin confirmed post stays REMOVED
-  AUTO_REMOVED       // system removed at high confidence, no admin action needed
+  RESTORED
+  CONFIRMED_REMOVAL
+  AUTO_REMOVED
+  BLACKLISTED
+  WHITELISTED
 }
 
 // ============================================================
@@ -274,18 +281,192 @@ enum AlertAction {
 model AdminAlert {
   id             String       @id @default(cuid())
   postId         String       @map("post_id")
+  commentId      String?      @map("comment_id")
   reportedUserId String       @map("reported_user_id")
-  flagDetails    String?      @map("flag_details")   // JSON: raw API scores + categories
+  flagDetails    String?      @map("flag_details")
+  flaggedPhrase  String?      @map("flagged_phrase")
   resolvedAt     DateTime?    @map("resolved_at")
   resolvedById   String?      @map("resolved_by_id")
-  resolvedAction AlertAction? @map("resolved_action") // null = pending admin review
+  resolvedAction AlertAction? @map("resolved_action")
   createdAt      DateTime     @default(now()) @map("created_at")
 
-  post         Post  @relation(fields: [postId], references: [id])
-  reportedUser User  @relation("ReportedInAlerts", fields: [reportedUserId], references: [id])
-  resolvedBy   User? @relation("AlertsResolvedBy", fields: [resolvedById], references: [id])
+  post         Post     @relation(fields: [postId], references: [id])
+  comment      Comment? @relation(fields: [commentId], references: [id])
+  reportedUser User     @relation("ReportedInAlerts", fields: [reportedUserId], references: [id], onDelete: Cascade)
+  resolvedBy   User?    @relation("AlertsResolvedBy", fields: [resolvedById], references: [id], onDelete: Cascade)
 
   @@index([resolvedAction])
   @@index([reportedUserId])
   @@map("admin_alerts")
+}
+// ============================================================
+// MODERATION LISTS
+// Admin-curated blacklist and whitelist for text moderation.
+// normalizedKey = squish_normalize(rawPhrase), used for dedup
+// only — runtime matching uses in-memory automatons.
+// ============================================================
+
+model ModerationBlacklist {
+  id            String   @id @default(cuid())
+  rawPhrase     String   @map("raw_phrase")
+  normalizedKey String   @unique @map("normalized_key")
+  addedById     String?   @map("added_by_id")
+  alertId       String?  @map("alert_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  addedBy User? @relation("BlacklistAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@index([normalizedKey])
+  @@map("moderation_blacklist")
+}
+
+model ModerationWhitelist {
+  id            String   @id @default(cuid())
+  rawPhrase     String   @map("raw_phrase")
+  normalizedKey String   @unique @map("normalized_key")
+  addedById     String?   @map("added_by_id")
+  alertId       String?  @map("alert_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  addedBy User? @relation("WhitelistAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@index([normalizedKey])
+  @@map("moderation_whitelist")
+}
+
+// ============================================================
+// ENUMS — AUDIT
+// ============================================================
+
+enum AuditActorType {
+  USER
+  ADMIN
+  SYSTEM
+}
+
+enum AuditEntityType {
+  USER
+  POST
+  COMMENT
+  LIKE
+  APPRECIATION
+  APPRECIATION_TYPE
+  ALERT
+  INVITATION
+}
+
+enum AuditEventType {
+  // ── User Lifecycle ─────────────────────────────────────────
+  USER_INVITED
+  USER_INVITATION_RESENT
+  USER_LOGIN_APP
+  USER_LOGIN_PANEL
+  USER_LOGOUT_APP
+  USER_LOGOUT_PANEL
+  USER_PROFILE_UPDATED
+  USER_AVATAR_UPDATED
+  USER_SOFT_DELETED
+  USER_RESTORED
+  USER_PERMANENTLY_DELETED
+
+  // ── Access Control ─────────────────────────────────────────
+  USER_BANNED
+  USER_BAN_UPDATED
+  USER_UNBANNED_MANUAL
+  USER_UNBANNED_AUTO
+  USER_ROLE_CHANGED
+
+  // ── Post Lifecycle ──────────────────────────────────────────
+  POST_CREATED
+  POST_SCAN_COMPLETED
+  POST_CAPTION_EDITED
+  POST_DELETED_BY_AUTHOR
+  POST_REMOVED_BY_ADMIN
+  POST_RESTORED_BY_ADMIN
+
+  // ── Post Interactions ───────────────────────────────────────
+  POST_LIKED
+  POST_UNLIKED
+  USER_TAGGED_IN_POST
+  USER_UNTAGGED_FROM_POST
+
+  // ── Comment Lifecycle ────────────────────────────────────────
+  COMMENT_CREATED
+  COMMENT_SCAN_COMPLETED
+  COMMENT_EDITED
+  COMMENT_DELETED_BY_AUTHOR
+  COMMENT_REMOVED_BY_ADMIN
+  COMMENT_RESTORED_BY_ADMIN
+
+  // ── Comment Interactions ─────────────────────────────────────
+  USER_TAGGED_IN_COMMENT
+
+  // ── Appreciations ─────────────────────────────────────────────
+  APPRECIATION_TYPE_CREATED
+  APPRECIATION_TYPE_TOGGLED
+  APPRECIATION_SENT
+
+  // ── Moderation ───────────────────────────────────────────────
+  ALERT_CREATED
+  ALERT_RESOLVED
+
+  // ── Analytics / Behavioural ─────────────────────────────────
+  USER_SEARCH_PERFORMED
+
+  // ── System Jobs — Per-Entity Events Only ─────────────────────
+  USER_BAN_EXPIRED
+  USER_PURGED_BY_JOB
+  SYSTEM_BIRTHDAY_POST_CREATED
+  SYSTEM_ANNIVERSARY_POST_CREATED
+}
+
+// ============================================================
+// AUDIT LOG
+// Immutable, append-only record of every event in the system.
+// ============================================================
+
+model AuditLog {
+  id               String           @id @default(cuid())
+  eventType        AuditEventType   @map("event_type")
+  actorType        AuditActorType   @map("actor_type")
+  actorId          String?          @map("actor_id")
+  entityType       AuditEntityType  @map("entity_type")
+  entityId         String           @map("entity_id")
+  parentEntityType AuditEntityType? @map("parent_entity_type")
+  parentEntityId   String?          @map("parent_entity_id")
+  metadata         Json?
+  createdAt        DateTime         @default(now()) @map("created_at")
+
+  actor             User?              @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  // Required reverse side of UserNotification.auditLog — every fan-out row
+  // generated from this event.
+  userNotifications UserNotification[]
+
+  @@index([entityType, entityId, createdAt(sort: Desc)])
+  @@index([actorId, createdAt(sort: Desc)])
+  @@index([eventType, createdAt(sort: Desc)])
+  @@index([parentEntityType, parentEntityId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+// ============================================================
+// USER NOTIFICATION
+// Fan-out table — one row per (audit_log × recipient).
+// ============================================================
+
+model UserNotification {
+  id          String    @id @default(cuid())
+  auditLogId  String    @map("audit_log_id")
+  recipientId String    @map("recipient_id")
+  readAt      DateTime? @map("read_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  auditLog  AuditLog @relation(fields: [auditLogId], references: [id], onDelete: Cascade)
+  recipient User     @relation("NotificationFeed", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@unique([auditLogId, recipientId])
+  @@index([recipientId, createdAt(sort: Desc)])
+  @@index([recipientId, readAt])
+  @@map("user_notifications")
 }

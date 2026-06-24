@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from jobs.unban_job import clear_expired_bans
 from jobs.purge_soft_deleted_job import purge_soft_deleted_users
 from jobs.daily_celebration_job import create_daily_celebration_posts
+from jobs.leaderboard_digest_job import send_leaderboard_digest
 from constants import APP_NAME, API_PREFIX
 from routes import auth
 from routes import users
@@ -34,6 +35,7 @@ from utils.exceptions import (
 from utils.ApiResponse import api_response
 from routes.appreciation_types import appreciation_types_router
 from routes.app.appreciations import appreciations_router, appreciation_types_app_router
+from routes.app.notifications import notifications_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -48,6 +50,15 @@ async def lifespan(app: FastAPI):
         minute=0,
         timezone=ZoneInfo("Asia/Kolkata"),
         id="daily_celebrations",
+    )
+    scheduler.add_job(
+        send_leaderboard_digest,
+        "cron",
+        day_of_week="mon",
+        hour=9,
+        minute=0,
+        timezone=ZoneInfo("Asia/Kolkata"),
+        id="leaderboard_digest",
     )
     scheduler.start()
     yield
@@ -90,8 +101,16 @@ app.include_router(appreciations_router, prefix=API_PREFIX)
 app.include_router(appreciation_types_app_router, prefix=API_PREFIX)
 app.include_router(alerts_router, prefix=API_PREFIX)
 app.include_router(app_users_router, prefix=API_PREFIX)
+app.include_router(notifications_router, prefix=f"{API_PREFIX}/app")
 
 # --- Health check ---
 @app.get("/health")
 async def health():
-    return api_response(200, message="OK")
+    return api_response(200, message="OK12")
+
+from services.moderation_service import reload_static_filter, invalidate_blacklist_cache
+
+@app.on_event("startup")
+async def startup():
+    await reload_static_filter()       # loads better-profanity with current whitelist
+    await invalidate_blacklist_cache() # builds Aho-Corasick automata from DB
