@@ -10,7 +10,7 @@ from services import auth_service
 from middlewares.auth import get_current_user
 from utils.ApiResponse import api_response
 from utils.exceptions import AppException, GoogleLoginDomainDenied
-from services.user_service import serialize_user
+from services.user_service import serialize_user_with_counts
 
 MOBILE_REDIRECT_URI = os.getenv("MOBILE_REDIRECT_URI")
 
@@ -37,7 +37,8 @@ async def google_callback(body: GoogleCallbackRequest):
 @auth_router.get("/me")
 async def me(current_user=Depends(get_current_user)):
     """Returns the current user's information. Requires valid JWT."""
-    return api_response(200, serialize_user(current_user), "Current user information")
+    user_data = await serialize_user_with_counts(current_user)
+    return api_response(200, user_data, "Current user information")
 
 
 @auth_router.post("/logout")

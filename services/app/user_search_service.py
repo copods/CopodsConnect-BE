@@ -1,7 +1,7 @@
 # services/app/user_search_service.py
 from db.client import db
 
-MAX_SEARCH_RESULTS = 10
+MAX_SEARCH_RESULTS = 100
 
 
 async def search_users(query: str, current_user_id: str) -> list[dict]:

@@ -110,6 +110,7 @@ model Post {
   deletedAt  DateTime?     @map("deleted_at")  // timestamp used by purge job for 30-day hard delete window
   createdAt  DateTime      @default(now()) @map("created_at")
   updatedAt  DateTime      @updatedAt @map("updated_at")
+  captionEditedAt DateTime? @map("caption_edited_at") // set only on author caption edit
 
   // Relations
   author   User?       @relation("PostAuthor", fields: [authorId], references: [id])

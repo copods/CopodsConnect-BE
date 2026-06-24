@@ -114,6 +114,19 @@ def serialize_user(u) -> dict:
     }
 
 
+async def serialize_user_with_counts(u) -> dict:
+    data = serialize_user(u)
+    sent_count = await db.appreciation.count(
+        where={"senderId": u.id, "deletedAt": None}
+    )
+    received_count = await db.appreciationrecipient.count(
+        where={"userId": u.id, "appreciation": {"deletedAt": None}}
+    )
+    data["appreciationGivenCount"] = sent_count
+    data["appreciationReceivedCount"] = received_count
+    return data
+
+
 # ============================================================
 # INVITE
 # ============================================================
