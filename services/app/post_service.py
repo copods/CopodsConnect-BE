@@ -144,6 +144,7 @@ def _serialize_post(
         "sourceUrl": post.sourceUrl,
         "createdAt": post.createdAt,
         "updatedAt": post.updatedAt,
+        "captionEditedAt": getattr(post, "captionEditedAt", None),
         "authorId": post.authorId,
         "author": _serialize_author(getattr(post, "author", None)),
         "media": [MediaOut.model_validate(m) for m in media],
@@ -439,7 +440,10 @@ async def update_post(current_user, post_id: str, body) -> dict:
 
     updated = await db.post.update(
         where={"id": post_id},
-        data={"caption": body.caption},
+        data={
+            "caption": body.caption,
+            "captionEditedAt": datetime.now(timezone.utc),
+        },
         include=POST_INCLUDE,
     )
     return _serialize_post(updated, current_user.id, include_comments=True)
