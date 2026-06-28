@@ -312,7 +312,8 @@ async def get_user_stats(user_id: str):
             (SELECT COUNT(*) FROM appreciations WHERE "sender_id" = '{user_id}' AND "deleted_at" IS NULL) as appreciations_sent,
             (SELECT COUNT(*) FROM likes WHERE "user_id" = '{user_id}') as total_likes,
             (SELECT COUNT(*) FROM comments WHERE "author_id" = '{user_id}' AND "deleted_at" IS NULL) as total_comments,
-            (SELECT COUNT(*) FROM posts WHERE "author_id" = '{user_id}' AND "deleted_at" IS NULL) as total_posts
+            (SELECT COUNT(*) FROM posts WHERE "author_id" = '{user_id}' AND "deleted_at" IS NULL) as total_posts,
+            (SELECT COUNT(*) FROM likes l JOIN posts p ON l."post_id" = p.id WHERE p."author_id" = '{user_id}') as likes_received
     """)
 
     return {
@@ -324,21 +325,40 @@ async def get_user_stats(user_id: str):
     }
 
 
-async def get_user_posts(user_id: str, page: int, page_size: int):
+async def get_user_posts(user_id :str , page: int, page_size: int):
     posts = await db.post.find_many(
-        where={"authorId": user_id, "deletedAt": None},
+        where={"authorId": user_id, "deletedAt":None},
         include={
-            "tags": {
-                "include": {"taggedUser": True}
-            }
+            "tags":{
+                "include":{"taggedUser":True}
+            },
+            "likes":True,
+            "comments":{
+                "where":{"deletedAt":None},
+                "include" :{"author":True},
+                "orderBy":{"createdAt":"asc"}
+            },
         },
-        order={"createdAt": "desc"},
-        skip=(page - 1) * page_size,
+        order={"createdAt":"desc"},
+        skip=(page -1)* page_size,
         take=page_size,
     )
 
-    total = await db.post.count(where={"authorId": user_id, "deletedAt": None})
-    return {"posts": jsonable_encoder([p.model_dump() for p in posts]), "total": total}
+    total = await db.post.count(
+        where={
+            "authorId":user_id,
+            "deletedAt":None
+        }  
+    )
+
+    result = []
+    for p in posts:
+        post_dict = p.model_dump()
+        post_dict["likeCount"] = len(p.likes) if p.likes else 0
+        post_dict["commentCount"]= len(p.comments) if p.comments else 0 
+        result.append(post_dict)
+    
+    return {"posts":jsonable_encoder(result), "total":total}
 
 async def get_appreciation_leaderboards():
     most_appreciated_persons = await db.query_raw("""
