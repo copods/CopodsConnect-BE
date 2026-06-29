@@ -4,6 +4,7 @@ from typing import Optional
 from datetime import datetime
 
 
+
 # ── Request schemas ───────────────────────────────────────────
 
 class CreateAppreciationRequest(BaseModel):
@@ -23,6 +24,7 @@ class AppreciationTypeMinimalOut(BaseModel):
     id: str
     name: str
     emojiUrl: str
+    badgeUrl: Optional[str] = None
     description: Optional[str] = None
     displayOrder: int
 

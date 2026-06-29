@@ -21,6 +21,7 @@ from models.schemas.app.posts import (
     UpdateCommentRequest,
     MediaUploadUrlRequest,  # add
     MediaUploadUrlResponse,
+    LikePostRequest,
 )
 
 posts_router = APIRouter(
@@ -118,9 +119,10 @@ async def admin_delete_post(
 @posts_router.post("/{post_id}/like")
 async def like_post(
     post_id: str,
+    body:LikePostRequest = LikePostRequest(),
     current_user=Depends(get_current_user),
 ):
-    result = await post_service.like_post(current_user, post_id)
+    result = await post_service.like_post(current_user, post_id,body)
     return api_response(200, result, "Post liked")
 
 

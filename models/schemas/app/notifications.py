@@ -29,6 +29,7 @@ class NotificationOut(BaseModel):
 
     # Frozen snapshot from the audit log row (event-specific shape)
     metadata: Optional[Any] = None
+    aggregatedCount: int = 1
 
     isRead: bool
     readAt: Optional[datetime] = None

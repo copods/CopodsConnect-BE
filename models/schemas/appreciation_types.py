@@ -8,6 +8,7 @@ class AppreciationTypeOut(BaseModel):
     id: str
     name: str
     emojiPath: str
+    badgePath: Optional[str] = None
     description: Optional[str] = None
     isActive: bool
     displayOrder: int
