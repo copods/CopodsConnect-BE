@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from fastapi.responses import RedirectResponse
 import os
 from middlewares.auth import get_current_user, require_platform
-from services.user_service import serialize_user
+from services.user_service import serialize_user_with_counts
 MOBILE_REDIRECT_URI = os.getenv("MOBILE_REDIRECT_URI")
 import services.auth_service as auth_service
 app_auth_router = APIRouter(
@@ -65,4 +65,5 @@ async def verify_google_token(body: dict):
 @app_auth_router.get("/me")
 async def me(current_user=Depends(require_platform("app"))):
     """Returns the current user's information. Requires valid app JWT."""
-    return api_response(200, serialize_user(current_user), "Current user information")
+    user_data = await serialize_user_with_counts(current_user)
+    return api_response(200, user_data, "Current user information")
