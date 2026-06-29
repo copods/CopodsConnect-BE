@@ -222,7 +222,7 @@ model AppreciationType {
   id           String   @id @default(cuid())
   name         String   @unique
   emojiPath    String   @map("emoji_path")
-  badgePath    String   @map("badge_path")
+  badgePath    String?  @map("badge_path")
   description  String?
   isActive     Boolean  @default(true) @map("is_active")
   displayOrder Int      @default(0) @map("display_order")

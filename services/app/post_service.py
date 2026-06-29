@@ -591,9 +591,11 @@ async def like_post(current_user, post_id: str, body=None) -> dict:
         raise AppException(404, "Post not found")
     if post.status == ContentStatus.REMOVED:
         raise AppException(400, "Post is removed")
-    reaction_type = body.reactionType if body else None
+
+    reaction_type = getattr(body, "reactionType", None) if body else None
     if not reaction_type:
-        reaction_type="LIKE"
+        reaction_type = "LIKE"
+
     existing = await db.like.find_first(
         where={"postId": post_id, "userId": current_user.id}
     )
@@ -608,21 +610,19 @@ async def like_post(current_user, post_id: str, body=None) -> dict:
         await db.like.create(
             data={"postId":post_id,"userId":current_user.id, "reactionType":reaction_type},
         )
-    
+        # Notify post author — skipped internally if liker == author
+        await write_audit_log(
+            event_type=AuditEventType.POST_LIKED,
+            actor_type=AuditActorType.USER,
+            actor_id=current_user.id,
+            entity_type=AuditEntityType.LIKE,
+            entity_id=post_id,
+            metadata={
+                "postAuthorId":post.authorId,
+                "postCaption":post.caption[:80] if post.caption else None
+            },
+        )
     count = await db.like.count(where={"postId": post_id})
-
-    # Notify post author — skipped internally if liker == author
-    await write_audit_log(
-        event_type=AuditEventType.POST_LIKED,
-        actor_type=AuditActorType.USER,
-        actor_id=current_user.id,
-        entity_type=AuditEntityType.LIKE,
-        entity_id=post_id,
-        metadata={
-            "postAuthorId":post.authorId,
-            "postCaption":post.caption[:80] if post.caption else None
-        },
-    )
 
     return LikeResponse(postId=post_id, liked=True, likeCount=count,reactionType=reaction_type).model_dump(mode="json")
 

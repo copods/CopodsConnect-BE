@@ -1,3 +1,5 @@
+from typing import List
+
 from fastapi import APIRouter, Depends, Query
 
 from middlewares.auth import get_current_user, require_platform
@@ -5,6 +7,7 @@ from services.app import appreciation_service
 from utils.ApiResponse import api_response
 from constants import DEFAULT_PAGE_SIZE
 from models.schemas.app.appreciations import (
+    AppreciationTypeMinimalOut,
     CreateAppreciationRequest,
     UpdateAppreciationRequest,
 )
@@ -25,7 +28,7 @@ appreciations_router = APIRouter(
 
 # ── Appreciation types (picker) ───────────────────────────────
 
-@appreciation_types_app_router.get("")
+@appreciation_types_app_router.get("", response_model=List[AppreciationTypeMinimalOut])
 async def get_active_types():
     result = await appreciation_service.get_active_types()
     return api_response(200, result, "Appreciation types fetched successfully")

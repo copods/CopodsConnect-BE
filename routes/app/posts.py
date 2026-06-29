@@ -19,6 +19,7 @@ from models.schemas.app.posts import (
     UpdatePostRequest,
     CreateCommentRequest,
     UpdateCommentRequest,
+    LikePostRequest,
     MediaUploadUrlRequest,  # add
     MediaUploadUrlResponse,
     LikePostRequest,

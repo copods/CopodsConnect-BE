@@ -1,7 +1,10 @@
 # routes/appreciation_types.py
-from fastapi import APIRouter, Depends, UploadFile, File
+from typing import List
+
+from fastapi import APIRouter, Depends
 
 from middlewares.auth import require_admin
+from models.schemas.appreciation_types import AppreciationTypeOut
 from services import appreciation_type_service
 from models.schemas.appreciation_types import (
     AppreciationTypeCreate,
@@ -17,24 +20,14 @@ appreciation_types_router = APIRouter(
 )
 
 
-@appreciation_types_router.get("")
+@appreciation_types_router.get("", response_model=List[AppreciationTypeOut])
 async def get_all_types():
     result = await appreciation_type_service.get_all_types()
-    return api_response(200, result, "Appreciation types fetched successfully")
-
-
-@appreciation_types_router.post("")
-async def create_type(data: AppreciationTypeCreate):
-    result = await appreciation_type_service.create_type(data)
-    return api_response(201, result, "Appreciation type created successfully")
-
-
-# NOTE: /reorder MUST be before /{type_id} — otherwise FastAPI
-# treats the literal string "reorder" as a type_id value.
-@appreciation_types_router.put("/reorder")
-async def reorder_types(body: AppreciationTypeReorderBody):
-    result = await appreciation_type_service.reorder_types(body)
-    return api_response(200, result, "Appreciation types reordered successfully")
+    return api_response(
+        200,
+        [item.model_dump(mode="json") for item in result],
+        "Appreciation types fetched successfully",
+    )
 
 
 @appreciation_types_router.patch("/{type_id}/toggle")
