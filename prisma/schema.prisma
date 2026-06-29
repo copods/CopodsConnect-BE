@@ -123,6 +123,7 @@ model Post {
   likes    Like[]
   comments Comment[]
   alerts   AdminAlert[]
+  appreciation Appreciation? 
 
   @@index([status, deletedAt, createdAt(sort: Desc)])
   @@index([authorId, status, deletedAt])
@@ -159,11 +160,11 @@ model PostTag {
 }
 
 model Like {
-  id           String   @id @default(cuid())
-  postId       String   @map("post_id")
-  userId       String   @map("user_id")
-  reactionType String?  @map("reaction_type")
-  createdAt    DateTime @default(now()) @map("created_at")
+  id        String   @id @default(cuid())
+  postId    String   @map("post_id")
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  reactionType String? @map("reaction_type") 
 
   post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
   user User @relation("UserLikes", fields: [userId], references: [id], onDelete: Cascade)
@@ -237,6 +238,7 @@ model Appreciation {
   id                 String    @id @default(cuid())
   senderId           String    @map("sender_id")
   appreciationTypeId String    @map("appreciation_type_id")
+  postId             String    @unique @map("post_id")
   message            String?
   deletedAt          DateTime? @map("deleted_at")
   createdAt          DateTime  @default(now()) @map("created_at")
@@ -244,6 +246,7 @@ model Appreciation {
 
   sender           User                    @relation("SentAppreciations", fields: [senderId], references: [id], onDelete: Cascade)
   appreciationType AppreciationType        @relation(fields: [appreciationTypeId], references: [id])
+  post             Post                    @relation(fields: [postId], references: [id], onDelete: Cascade) 
   recipients       AppreciationRecipient[]
 
   @@index([senderId])

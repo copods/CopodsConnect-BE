@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 
 from db.client import db
-from prisma.enums import AlertAction, ContentStatus, Role
+from prisma.enums import AlertAction, ContentStatus, Role, PostType
 from services.audit_service import write_audit_log
 from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
 from utils.email import send_nsfw_alert_email
@@ -237,17 +237,40 @@ async def resolve_alert(alert_id: str, action: AlertAction, resolved_by_id: str)
     )
 
     # ── Update content status ─────────────────────────────────
+    # If the new status is REMOVED, set deletedAt to now. If PUBLISHED (restored), set it back to None.
+    new_deleted_at = None if new_content_status == ContentStatus.PUBLISHED else now
+
     if alert.commentId:
         updated_content = await db.comment.update(
             where={"id": alert.commentId},
-            data={"status": new_content_status},
+            data={"status": new_content_status, "deletedAt": new_deleted_at},
         )
     else:
         updated_content = await db.post.update(
             where={"id": alert.postId},
-            data={"status": new_content_status},
+            data={"status": new_content_status, "deletedAt": new_deleted_at},
         )
+        # --- NEW: Late Materialization ---
+        if new_content_status == ContentStatus.PUBLISHED and updated_content.type == PostType.APPRECIATION:
+            # Check if it was already materialized
+            existing_appr = await db.appreciation.find_first(where={"postId": alert.postId})
+            if not existing_appr:
+                import json
+                flag_data = json.loads(alert.flagDetails)
+                appr_type_id = flag_data.get("appreciationTypeId")
+                recipient_ids = flag_data.get("recipientIds")
+                
+                if appr_type_id and recipient_ids:
+                    from services.app.post_service import _materialize_appreciation
+                    await _materialize_appreciation(
+                        post_id=alert.postId,
+                        sender_id=updated_content.authorId,
+                        appreciation_type_id=appr_type_id,
+                        recipient_ids=recipient_ids
+                    )
 
+
+    
     await write_audit_log(
         event_type=AuditEventType.ALERT_RESOLVED,
         actor_type=AuditActorType.ADMIN,

@@ -1,6 +1,12 @@
 #routes/app/posts.py
+from db.client import db
 from fastapi import APIRouter, Depends, Query
 from typing import Optional
+from db.client import db
+from prisma.enums import Role, ContentStatus, FlagReason
+from utils.exceptions import AppException
+from middlewares.auth import require_admin
+from datetime import datetime, timezone
 
 from middlewares.auth import get_current_user, require_platform
 from services.app import post_service
@@ -16,6 +22,7 @@ from models.schemas.app.posts import (
     LikePostRequest,
     MediaUploadUrlRequest,  # add
     MediaUploadUrlResponse,
+    LikePostRequest,
 )
 
 posts_router = APIRouter(
@@ -86,16 +93,37 @@ async def delete_post(
     result = await post_service.delete_post(current_user, post_id)
     return api_response(200, result, "Post deleted successfully")
 
+@posts_router.delete("/{post_id}/admin")
+async def admin_delete_post(
+    post_id: str, 
+    current_user=Depends(require_admin)
+):
+    post = await db.post.find_unique(where={"id": post_id}, include={"author": True})
+    
+    if not post:
+        raise AppException(404, "Post not found")
+    # Hierarchy rule: Admins cannot delete posts made by other admins/super_admins
+    if post.author and post.author.role in [Role.ADMIN, Role.SUPER_ADMIN] and current_user.role != Role.SUPER_ADMIN:
+        raise AppException(403, "You cannot delete posts authored by another Admin.")
+    now = datetime.now(timezone.utc)
+    
+    # Soft delete the post AND set status to REMOVED
+    await db.post.update(
+        where={"id": post_id},
+        data={"deletedAt": now, "status": ContentStatus.REMOVED, "flagReason": FlagReason.NORMAL}
+    )
+    
+    return api_response(200, None, "Post removed by admin")
 
 # ── Likes ─────────────────────────────────────────────────────
 
 @posts_router.post("/{post_id}/like")
 async def like_post(
     post_id: str,
-    body: LikePostRequest = LikePostRequest(),
+    body:LikePostRequest = LikePostRequest(),
     current_user=Depends(get_current_user),
 ):
-    result = await post_service.like_post(current_user, post_id, body)
+    result = await post_service.like_post(current_user, post_id,body)
     return api_response(200, result, "Post liked")
 
 
