@@ -43,6 +43,17 @@ def _build_emoji_url(emoji_path: str) -> str:
     return f"{BASE_URL}/{emoji_path}"
 
 
+def _serialize_appreciation_type(t) -> AppreciationTypeMinimalOut:
+    return AppreciationTypeMinimalOut(
+        id=t.id,
+        name=t.name,
+        emojiUrl=_build_emoji_url(t.emojiPath),
+        badgeUrl=_build_emoji_url(t.badgePath) if t.badgePath else None,
+        description=t.description,
+        displayOrder=t.displayOrder,
+    )
+
+
 def _serialize_appreciation(a) -> dict:
     sender = getattr(a, "sender", None)
     appreciation_type = getattr(a, "appreciationType", None)
@@ -58,13 +69,9 @@ def _serialize_appreciation(a) -> dict:
             designation=sender.designation,
         ) if sender else None,
         appreciationTypeId=a.appreciationTypeId,
-        appreciationType=AppreciationTypeMinimalOut(
-            id=appreciation_type.id,
-            name=appreciation_type.name,
-            emojiUrl=_build_emoji_url(appreciation_type.emojiPath),
-            description=appreciation_type.description,
-            displayOrder=appreciation_type.displayOrder,
-        ) if appreciation_type else None,
+        appreciationType=_serialize_appreciation_type(appreciation_type)
+        if appreciation_type
+        else None,
         message=a.message,
         createdAt=a.createdAt,
         updatedAt=a.updatedAt,
@@ -99,13 +106,7 @@ async def get_active_types() -> list[dict]:
         order={"displayOrder": "asc"},
     )
     return [
-        AppreciationTypeMinimalOut(
-            id=t.id,
-            name=t.name,
-            emojiUrl=_build_emoji_url(t.emojiPath),
-            description=t.description,
-            displayOrder=t.displayOrder,
-        ).model_dump(mode="json")
+        _serialize_appreciation_type(t).model_dump(mode="json")
         for t in types
     ]
 

@@ -40,6 +40,9 @@ class CreateCommentRequest(BaseModel):
 class UpdateCommentRequest(BaseModel):
     body: str
 
+class LikePostRequest(BaseModel):
+    reactionType: Optional[str] = "LIKE"
+
 # ── Response schemas ──────────────────────────────────────────
 
 class MediaOut(BaseModel):
@@ -108,6 +111,7 @@ class PostOut(BaseModel):
     likeCount: int = 0
     commentCount: int = 0
     isLikedByMe: bool = False
+    reactionType: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -124,6 +128,7 @@ class LikeResponse(BaseModel):
     postId: str
     liked: bool
     likeCount: int
+    reactionType: Optional[str] = None
 
 class DeletePostResponse(BaseModel):
     deletedPostId: str

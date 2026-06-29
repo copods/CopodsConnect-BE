@@ -6,22 +6,23 @@ from models.schemas.appreciation_types import AppreciationTypeOut
 
 # ── Serializer ────────────────────────────────────────────────
 
-def _serialize_type(t) -> dict:
+def _serialize_type(t) -> AppreciationTypeOut:
     return AppreciationTypeOut(
         id=t.id,
         name=t.name,
         emojiPath=t.emojiPath,
+        badgePath=t.badgePath,
         description=t.description,
         isActive=t.isActive,
         displayOrder=t.displayOrder,
         createdAt=t.createdAt,
         updatedAt=t.updatedAt,
-    ).model_dump(mode="json")
+    )
 
 
 # ── Service functions ─────────────────────────────────────────
 
-async def get_all_types() -> list[dict]:
+async def get_all_types() -> list[AppreciationTypeOut]:
     types = await db.appreciationtype.find_many(
         order={"displayOrder": "asc"}
     )
@@ -37,4 +38,4 @@ async def toggle_type(type_id: str) -> dict:
         where={"id": type_id},
         data={"isActive": not existing.isActive},
     )
-    return _serialize_type(updated)
+    return _serialize_type(updated).model_dump(mode="json")

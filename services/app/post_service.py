@@ -151,6 +151,10 @@ def _serialize_post(
         "likeCount": len(likes),
         "commentCount": comment_count,
         "isLikedByMe": any(like.userId == current_user_id for like in likes),
+        "reactionType": next(
+            (like.reactionType for like in likes if like.userId == current_user_id),
+            None,
+        ),
     }
     if include_comments:
         payload["comments"] = [_serialize_comment(c) for c in comments_rel]
@@ -475,19 +479,42 @@ async def delete_post(current_user, post_id: str) -> dict:
 
 # ── Likes ─────────────────────────────────────────────────────
 
-async def like_post(current_user, post_id: str) -> dict:
+async def like_post(current_user, post_id: str, body=None) -> dict:
     post = await db.post.find_unique(where={"id": post_id})
     if not post or post.deletedAt is not None:
         raise AppException(404, "Post not found")
     if post.status == ContentStatus.REMOVED:
         raise AppException(400, "Post is removed")
+
+    reaction_type = getattr(body, "reactionType", None) if body else None
+    if not reaction_type:
+        reaction_type = "LIKE"
+
     existing = await db.like.find_first(
         where={"postId": post_id, "userId": current_user.id}
     )
     if existing:
-        raise AppException(400, "You have already liked this post")
+        if existing.reactionType == reaction_type:
+            raise AppException(400, "You have already liked this post")
+        await db.like.update(
+            where={"id": existing.id},
+            data={"reactionType": reaction_type},
+        )
+        count = await db.like.count(where={"postId": post_id})
+        return LikeResponse(
+            postId=post_id,
+            liked=True,
+            likeCount=count,
+            reactionType=reaction_type,
+        ).model_dump(mode="json")
 
-    await db.like.create(data={"postId": post_id, "userId": current_user.id})
+    await db.like.create(
+        data={
+            "postId": post_id,
+            "userId": current_user.id,
+            "reactionType": reaction_type,
+        }
+    )
     count = await db.like.count(where={"postId": post_id})
 
     # Notify post author — skipped internally if liker == author
@@ -503,7 +530,12 @@ async def like_post(current_user, post_id: str) -> dict:
         },
     )
 
-    return LikeResponse(postId=post_id, liked=True, likeCount=count).model_dump(mode="json")
+    return LikeResponse(
+        postId=post_id,
+        liked=True,
+        likeCount=count,
+        reactionType=reaction_type,
+    ).model_dump(mode="json")
 
 
 async def unlike_post(current_user, post_id: str) -> dict:
@@ -521,7 +553,12 @@ async def unlike_post(current_user, post_id: str) -> dict:
     await db.like.delete(where={"id": existing.id})
     count = await db.like.count(where={"postId": post_id})
 
-    return LikeResponse(postId=post_id, liked=False, likeCount=count).model_dump(mode="json")
+    return LikeResponse(
+        postId=post_id,
+        liked=False,
+        likeCount=count,
+        reactionType=None,
+    ).model_dump(mode="json")
 
 
 # ── Comments ──────────────────────────────────────────────────
