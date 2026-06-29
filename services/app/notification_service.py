@@ -93,12 +93,40 @@ async def get_notifications(
 
     next_cursor = notifications[-1].id if has_more else None
 
-    serialized = []
+    serialized_list = []
     for n in notifications:
-        serialized.append(await _serialize_user_notification(n))
+        serialized_list.append(await _serialize_user_notification(n))
+
+        # Aggregation Logic
+    grouped_notifications= []
+    seen={}
+
+    for sn in serialized_list:
+        event_type = sn["eventType"]
+
+        # only aggregate LIKED and COMMENT_CREATED
+        if event_type in ("POST_LIKED", "COMMENT_CREATED"):
+            # Grouping key : eventType + target entity ID + recipientId
+            entity_key= sn.get("parentEntityId") or sn.get("entityId")
+            key = (event_type, entity_key, current_user.id)
+
+            if key in seen : 
+                base_sn = seen[key]
+                base_sn["aggregatedCount"]+=1
+
+                # If this older notification is unread , ensure the base group shows as unread 
+
+                if not sn["isRead"] and base_sn["isRead"]:
+                    base_sn["isRead"]=False
+                    base_sn["readAt"]=None
+                continue
+                    
+            seen[key]=sn
+            
+        grouped_notifications.append(sn)
 
     return NotificationListResponse(
-        notifications=serialized,
+        notifications=grouped_notifications,
         nextCursor=next_cursor,
         hasMore=has_more,
     ).model_dump(mode="json")
@@ -113,20 +141,41 @@ async def get_unread_count(current_user, event_types: list | None = None) -> dic
 
 
 async def mark_notification_read(current_user, notification_id: str) -> dict:
-    notif = await db.usernotification.find_unique(where={"id": notification_id})
+    # We must include auditLog to check what type it is
+    notif = await db.usernotification.find_unique(where={"id": notification_id}, include={"auditLog": True})
     if not notif or notif.recipientId != current_user.id:
         raise AppException(404, "Notification not found")
-    if notif.readAt is not None:
-        return MarkReadResponse(
-            notificationId=notification_id,
-            isRead=True,
-            readAt=notif.readAt,
-        ).model_dump(mode="json")
+        
     now = datetime.now(timezone.utc)
-    await db.usernotification.update(
-        where={"id": notification_id},
-        data={"readAt": now},
-    )
+    al = notif.auditLog
+
+    # If this is an aggregated event type, mark ALL related unread notifications as read!
+    if al.eventType in ("POST_LIKED", "COMMENT_CREATED"):
+        where_clause = {
+            "recipientId": current_user.id,
+            "readAt": None,
+            "auditLog": {
+                "eventType": al.eventType,
+            }
+        }
+        
+        if al.parentEntityId:
+            where_clause["auditLog"]["parentEntityId"] = al.parentEntityId
+        else:
+            where_clause["auditLog"]["entityId"] = al.entityId
+
+        await db.usernotification.update_many(
+            where=where_clause,
+            data={"readAt": now},
+        )
+    else:
+        # Standard single read for non-aggregated notifications
+        if notif.readAt is None:
+            await db.usernotification.update(
+                where={"id": notification_id},
+                data={"readAt": now},
+            )
+
     return MarkReadResponse(
         notificationId=notification_id,
         isRead=True,
@@ -134,10 +183,3 @@ async def mark_notification_read(current_user, notification_id: str) -> dict:
     ).model_dump(mode="json")
 
 
-async def mark_all_notifications_read(current_user, event_types: list | None = None) -> dict:
-    where: dict = {"recipientId": current_user.id, "readAt": None}
-    if event_types:
-        where["auditLog"] = {"eventType": {"in": event_types}}
-    now = datetime.now(timezone.utc)
-    result = await db.usernotification.update_many(where=where, data={"readAt": now})
-    return MarkAllReadResponse(updatedCount=result).model_dump(mode="json")

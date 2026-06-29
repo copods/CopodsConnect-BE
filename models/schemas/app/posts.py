@@ -11,6 +11,8 @@ class CreatePostRequest(BaseModel):
     type: PostType = PostType.USER_POST
     media: list["MediaItem"] = []
     taggedUserIds: list[str] = []
+    appreciationTypeId: Optional[str] = None # NEW
+    recipientIds: list[str] = [] # NEW
 
 
 class MediaItem(BaseModel):
@@ -39,6 +41,9 @@ class CreateCommentRequest(BaseModel):
 
 class UpdateCommentRequest(BaseModel):
     body: str
+
+class LikePostRequest(BaseModel):
+    reactionType: Optional[str]= "LIKE"
 
 # ── Response schemas ──────────────────────────────────────────
 
@@ -92,6 +97,14 @@ class CommentOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+# 2. Add AppreciationOut (place this before PostOut)
+class AppreciationOut(BaseModel):
+    appreciationTypeId: str
+    appreciationTypeName: str
+    badgePath: str
+    description: Optional[str] = None
+    recipients: list["TagOut"] = []
+    model_config = ConfigDict(from_attributes=True)
 
 class PostOut(BaseModel):
     id: str
@@ -101,6 +114,7 @@ class PostOut(BaseModel):
     sourceUrl: Optional[str] = None
     createdAt: datetime
     updatedAt: datetime
+    captionEditedAt: Optional[datetime] = None
     authorId: Optional[str] = None
     author: Optional[AuthorOut] = None
     media: list[MediaOut] = []
@@ -108,6 +122,8 @@ class PostOut(BaseModel):
     likeCount: int = 0
     commentCount: int = 0
     isLikedByMe: bool = False
+    appreciation: Optional[AppreciationOut] = None # NEW4
+    reactionType:Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -124,6 +140,7 @@ class LikeResponse(BaseModel):
     postId: str
     liked: bool
     likeCount: int
+    reactionType: Optional[str]=None
 
 class DeletePostResponse(BaseModel):
     deletedPostId: str

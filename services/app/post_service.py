@@ -53,6 +53,12 @@ POST_INCLUDE = {
         },
         "order_by": {"createdAt": "asc"},
     },
+    "appreciation": {  
+        "include": {
+            "appreciationType": True,
+            "recipients": {"include": {"recipient": True}}
+        }
+    }
 }
 
 FEED_INCLUDE = {
@@ -60,7 +66,12 @@ FEED_INCLUDE = {
     "media": {"order_by": {"order": "asc"}},
     "tags": {"include": {"taggedUser": True}},
     "likes": True,
-    # "_count": {"select": {"comments": True}},
+    "appreciation": {  # NEW
+        "include": {
+            "appreciationType": True,
+            "recipients": {"include": {"recipient": True}}
+        }
+    }
 }
 
 COMMENT_COUNT_WHERE = {
@@ -144,6 +155,7 @@ def _serialize_post(
         "sourceUrl": post.sourceUrl,
         "createdAt": post.createdAt,
         "updatedAt": post.updatedAt,
+        "captionEditedAt": getattr(post, "captionEditedAt", None),
         "authorId": post.authorId,
         "author": _serialize_author(getattr(post, "author", None)),
         "media": [MediaOut.model_validate(m) for m in media],
@@ -151,6 +163,25 @@ def _serialize_post(
         "likeCount": len(likes),
         "commentCount": comment_count,
         "isLikedByMe": any(like.userId == current_user_id for like in likes),
+        "reactionType": next(
+            (like.reactionType for like in likes if like.userId == current_user_id), None
+        ),
+        # --- NEW BLOCK ---
+        "appreciation": {
+            "appreciationTypeId": post.appreciation.appreciationTypeId,
+            "appreciationTypeName": post.appreciation.appreciationType.name,
+            "badgePath": post.appreciation.appreciationType.badgePath,
+            "description": post.appreciation.appreciationType.description,
+            "recipients": [
+                {
+                    "id": r.id,
+                    "taggedUserId": r.recipientId,
+                    "taggedUserName": r.recipient.name,
+                    "taggedUserPicture": r.recipient.picture
+                } for r in post.appreciation.recipients
+            ]
+        } if getattr(post, "type", None) == PostType.APPRECIATION and getattr(post, "appreciation", None) else None,
+        # -----------------
     }
     if include_comments:
         payload["comments"] = [_serialize_comment(c) for c in comments_rel]
@@ -162,6 +193,12 @@ def _serialize_post(
 # ── CRUD: Posts ───────────────────────────────────────────────
 
 async def create_post(current_user, body) -> dict:
+    if body.type == PostType.APPRECIATION:
+        if not body.appreciationTypeId or not body.recipientIds:
+            raise AppException(400, "appreciationTypeId and recipientIds are required for appreciation posts")
+        # Silently deduplicate: remove recipients from normal tags
+        body.taggedUserIds = [uid for uid in body.taggedUserIds if uid not in body.recipientIds]
+
     for m in body.media:
         storage_service.assert_allowed_post_media_url(m.url)
 
@@ -239,10 +276,25 @@ async def create_post(current_user, body) -> dict:
             post = await db.post.update(
                 where={"id": post.id},
                 data={"status": ContentStatus.PUBLISHED},
-                include={"tags": True},
+                include=FEED_INCLUDE, # <--- CHANGED
             )
+            
+            # --- NEW BLOCK ---
+            if body.type == PostType.APPRECIATION:
+                await _materialize_appreciation(
+                    post_id=post.id,
+                    sender_id=current_user.id,
+                    appreciation_type_id=body.appreciationTypeId,
+                    recipient_ids=body.recipientIds
+                )
+            # -----------------
+            
             await _write_published_audit(post, current_user.id, text_score, image_score)
+            
+            # --- NEW LINE (Refetch to get nested appreciation) ---
+            post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
             return _serialize_post(post, current_user.id, include_comments=False)
+
 
         note = (
             f"Whitelisted term ('{text_phrase}') — AI flagged anyway "
@@ -265,6 +317,8 @@ async def create_post(current_user, body) -> dict:
                 "text_score":  text_score,
                 "image_score": image_score,
                 "reason":      FlagReason.NSFW_TEXT.value,
+                "appreciationTypeId": body.appreciationTypeId if body.type == PostType.APPRECIATION else None,
+                "recipientIds": body.recipientIds if body.type == PostType.APPRECIATION else None,
                 "category":    text_category,
                 "confidence":  text_confidence,
             },
@@ -304,6 +358,8 @@ async def create_post(current_user, body) -> dict:
                 "text_score":  text_score,
                 "image_score": image_score,
                 "reason":      FlagReason.NSFW_IMAGE.value,
+                "appreciationTypeId": body.appreciationTypeId if body.type == PostType.APPRECIATION else None,
+                "recipientIds": body.recipientIds if body.type == PostType.APPRECIATION else None,
             },
             flagged_phrase=None,
         )
@@ -327,10 +383,25 @@ async def create_post(current_user, body) -> dict:
     post = await db.post.update(
         where={"id": post.id},
         data={"status": ContentStatus.PUBLISHED},
-        include={"tags": True},
+        include=FEED_INCLUDE, # <--- CHANGED
     )
+    
+    # --- NEW BLOCK ---
+    if body.type == PostType.APPRECIATION:
+        await _materialize_appreciation(
+            post_id=post.id,
+            sender_id=current_user.id,
+            appreciation_type_id=body.appreciationTypeId,
+            recipient_ids=body.recipientIds
+        )
+    # -----------------
+    
     await _write_published_audit(post, current_user.id, text_score, image_score)
+    
+    # --- NEW LINE (Refetch to get nested appreciation) ---
+    post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
     return _serialize_post(post, current_user.id, include_comments=False)
+
 
 
 async def _noop_text_scan():
@@ -366,6 +437,35 @@ async def _write_published_audit(post, author_id: str, text_score: float, image_
                 },
             )
 
+async def _materialize_appreciation(post_id: str, sender_id: str, appreciation_type_id: str, recipient_ids: list[str]):
+    appreciation = await db.appreciation.create(
+        data={
+            "postId": post_id,
+            "senderId": sender_id,
+            "appreciationTypeId": appreciation_type_id,
+            "recipients": {
+                "create": [{"recipientId": rid} for rid in recipient_ids]
+            }
+        },
+        include={"appreciationType": True}
+    )
+    
+    # Fire the audit event which triggers the notification
+    from services.audit_service import write_audit_log
+    await write_audit_log(
+        event_type=AuditEventType.APPRECIATION_SENT,
+        actor_type=AuditActorType.USER,
+        actor_id=sender_id,
+        entity_type=AuditEntityType.APPRECIATION,
+        entity_id=appreciation.id,
+        parent_entity_type=AuditEntityType.POST,
+        parent_entity_id=post_id,
+        metadata={
+            "recipientIds": recipient_ids,
+            "appreciationTypeName": appreciation.appreciationType.name,
+            "badgePath": appreciation.appreciationType.badgePath,
+        }
+    )
 
 async def get_feed(
     current_user,
@@ -439,7 +539,10 @@ async def update_post(current_user, post_id: str, body) -> dict:
 
     updated = await db.post.update(
         where={"id": post_id},
-        data={"caption": body.caption},
+        data={
+            "caption": body.caption,
+            "captionEditedAt": datetime.now(timezone.utc),
+        },
         include=POST_INCLUDE,
     )
     return _serialize_post(updated, current_user.id, include_comments=True)
@@ -455,6 +558,13 @@ async def delete_post(current_user, post_id: str) -> dict:
         raise AppException(403, "You can only delete your own posts")
 
     now = datetime.now(timezone.utc)
+    # --- NEW BLOCK ---
+    if post.type == PostType.APPRECIATION:
+        await db.appreciation.update_many(
+            where={"postId": post.id},
+            data={"deletedAt": now}
+        )
+    # -----------------
     await db.post.update(
         where={"id": post_id},
         data={
@@ -475,19 +585,30 @@ async def delete_post(current_user, post_id: str) -> dict:
 
 # ── Likes ─────────────────────────────────────────────────────
 
-async def like_post(current_user, post_id: str) -> dict:
+async def like_post(current_user, post_id: str, body=None) -> dict:
     post = await db.post.find_unique(where={"id": post_id})
     if not post or post.deletedAt is not None:
         raise AppException(404, "Post not found")
     if post.status == ContentStatus.REMOVED:
         raise AppException(400, "Post is removed")
+    reaction_type = body.reactionType if body else None
+    if not reaction_type:
+        reaction_type="LIKE"
     existing = await db.like.find_first(
         where={"postId": post_id, "userId": current_user.id}
     )
     if existing:
-        raise AppException(400, "You have already liked this post")
-
-    await db.like.create(data={"postId": post_id, "userId": current_user.id})
+        if existing.reactionType == reaction_type:
+            raise AppException(400, "You have already liked this post with this reaction.")
+        await db.like.update(
+            where={"id":existing.id},
+            data={"reactionType":reaction_type},
+        )
+    else:
+        await db.like.create(
+            data={"postId":post_id,"userId":current_user.id, "reactionType":reaction_type},
+        )
+    
     count = await db.like.count(where={"postId": post_id})
 
     # Notify post author — skipped internally if liker == author
@@ -503,7 +624,7 @@ async def like_post(current_user, post_id: str) -> dict:
         },
     )
 
-    return LikeResponse(postId=post_id, liked=True, likeCount=count).model_dump(mode="json")
+    return LikeResponse(postId=post_id, liked=True, likeCount=count,reactionType=reaction_type).model_dump(mode="json")
 
 
 async def unlike_post(current_user, post_id: str) -> dict:
@@ -521,7 +642,7 @@ async def unlike_post(current_user, post_id: str) -> dict:
     await db.like.delete(where={"id": existing.id})
     count = await db.like.count(where={"postId": post_id})
 
-    return LikeResponse(postId=post_id, liked=False, likeCount=count).model_dump(mode="json")
+    return LikeResponse(postId=post_id, liked=False, likeCount=count,reactionType=None).model_dump(mode="json")
 
 
 # ── Comments ──────────────────────────────────────────────────

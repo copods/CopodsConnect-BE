@@ -39,19 +39,22 @@ async def get_unread_count(
     )
     return api_response(200, result, "Unread count fetched successfully")
 
+"""
+FRONTEND IMPLEMENTATION HINTS:
+- The /read-all endpoint has been officially deprecated and removed.
+- To maintain an accurate unread badge count, you must ONLY use this /{notification_id}/read endpoint.
 
-@notifications_router.patch("/read-all", summary="Mark all notifications as read")
-async def mark_all_read(
-    current_user=Depends(get_current_user),
-    event_types: list[AuditEventType] | None = Query(default=None, alias="eventTypes"),
-):
-    result = await notification_service.mark_all_notifications_read(
-        current_user=current_user,
-        event_types=event_types,
-    )
-    return api_response(200, result, "Notifications marked as read")
-
-
+WORKFLOW:
+1. When the user clicks the bell icon: Do nothing API-wise. Just show the dropdown.
+2. When the user clicks an individual notification card:
+   a) Call this PATCH endpoint in the background to mark it as read.
+   b) Reduce your local unread count by 1 in the UI.
+   c) Redirect the user using the notification properties:
+      -> If eventType is POST_LIKED / APPRECIATION_SENT / USER_TAGGED_IN_POST:
+         Redirect to: `/posts/${entityId}`
+      -> If eventType is COMMENT_CREATED / USER_TAGGED_IN_COMMENT:
+         Redirect to: `/posts/${parentEntityId}?highlightComment=${entityId}`
+"""
 @notifications_router.patch("/{notification_id}/read", summary="Mark a single notification as read")
 async def mark_notification_read(
     notification_id: str,
