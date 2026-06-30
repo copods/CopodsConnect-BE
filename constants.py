@@ -17,3 +17,7 @@ ALLOWED_EMAIL_DOMAIN = "copods.co"
 MODERATION_REVIEW_THRESHOLD = 0.5      # score >= this → FLAGGED, admin reviews
 
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+
+# Poll constraints
+POLL_MIN_OPTIONS = 2
+POLL_MAX_OPTIONS = 5

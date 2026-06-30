@@ -7,7 +7,12 @@ from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
 from db.client import db
 from prisma.enums import PostType, ContentStatus, FlagReason
 from utils.exceptions import AppException
-from constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from constants import (
+    DEFAULT_PAGE_SIZE, 
+    MAX_PAGE_SIZE,
+    POLL_MIN_OPTIONS,
+    POLL_MAX_OPTIONS
+)
 from models.schemas.app.posts import (
     PostOut,
     PostDetailOut,
@@ -58,6 +63,11 @@ POST_INCLUDE = {
             "appreciationType": True,
             "recipients": {"include": {"recipient": True}}
         }
+    },
+    "poll": { # NEW
+        "include": {
+            "options": {"order_by":{"order":"asc"}},
+        }
     }
 }
 
@@ -70,6 +80,11 @@ FEED_INCLUDE = {
         "include": {
             "appreciationType": True,
             "recipients": {"include": {"recipient": True}}
+        }
+    },
+    "poll": { # NEW
+        "include": {
+            "options": {"order_by":{"order":"asc"}},
         }
     }
 }
@@ -126,13 +141,80 @@ def _serialize_comment(comment) -> CommentOut:
         tags=[_serialize_comment_tag(t) for t in tags],
     )
 
+# ── Poll helpers ─────────────────────────────────────────────
 
+def _is_poll_open(poll) -> bool:
+    """
+    A poll is open unless it was manually closed, or its natural
+    deadline has passed. Reopening clears isManuallyClosed but does
+    NOT touch closesAt — if closesAt is still in the past after a
+    reopen, the poll falls back into "naturally expired" state, which
+    is exactly what extend_poll() exists to fix.
+    """
+    if poll.isManuallyClosed:
+        return False
+    if poll.closesAt and datetime.now(timezone.utc) >= poll.closesAt: 
+        return False
+    return True
+
+def _serialize_poll(poll, user_vote_option_id: str | None) -> dict:
+    options = sorted(getattr(poll, "options", []) or [], key=lambda o: o.order)
+    total_votes = sum(o.voteCount for o in options)
+    return {
+        "id" : poll.id, 
+        "closesAt": poll.closesAt,
+        "isManuallyClosed": poll.isManuallyClosed,
+        "manuallyClosedAt": poll.manuallyClosedAt,
+        "isOpen": _is_poll_open(poll),
+        "totalVotes":total_votes,
+        "userVoteOptionId": user_vote_option_id,
+        "options":[
+            {"id": o.id, "text": o.text, "order":o.order, "voteCount": o.voteCount}
+            for o in options
+        ],
+    }
+
+async def _single_user_poll_vote(poll_id:str , user_id:str)-> str | None:
+    vote = await db.pollvote.find_first(
+        where={
+            "pollId": poll_id,
+            "userId":user_id
+        }
+    )
+    return vote.optionId if vote else None
+
+async def _user_poll_votes(poll_ids:list[str], user_id:str)-> dict[str,str]:
+    """Batch version of _single_user_poll_vote, used in feed serialization."""
+    if not poll_ids:
+        return {}
+    votes = await db.pollvote.find_many(
+        where={
+            "pollId":{
+                "in": poll_ids
+            },
+            "userId":user_id
+        }
+    )
+    return {v.pollId: v.optionId for v in votes}
+
+def _build_poll_flag_details(body)->dict:
+    """
+    Captures everything needed to materialize a poll later — used both
+    when a poll is queued for AI review AND when it's auto-removed by
+    the blacklist, since an admin can restore either case and we need
+    the option texts/deadline to reconstruct the Poll/PollOption rows.
+    """
+    return {
+        "pollOptionTexts": body.pollOptions,
+        "pollClosesAt": body.pollClosesAt.isoformat() if body.pollClosesAt else None,
+    }
 
 def _serialize_post(
     post,
     current_user_id: str,
     include_comments: bool = False,
     comment_count: int | None = None,
+    user_vote_option_id: str | None = None, # NEW: Added for Polls
 ) -> dict:
     likes = getattr(post, "likes", []) or []
     comments_rel = getattr(post, "comments", []) or []
@@ -166,7 +248,6 @@ def _serialize_post(
         "reactionType": next(
             (like.reactionType for like in likes if like.userId == current_user_id), None
         ),
-        # --- NEW BLOCK ---
         "appreciation": {
             "appreciationTypeId": post.appreciation.appreciationTypeId,
             "appreciationTypeName": post.appreciation.appreciationType.name,
@@ -181,7 +262,14 @@ def _serialize_post(
                 } for r in post.appreciation.recipients
             ]
         } if getattr(post, "type", None) == PostType.APPRECIATION and getattr(post, "appreciation", None) else None,
-        # -----------------
+        
+        # --- NEW POLL SERIALIZATION ---
+        "poll": (
+            _serialize_poll(post.poll, user_vote_option_id)
+            if getattr(post, "type", None) == PostType.POLL and getattr(post, "poll", None)
+            else None
+        ),
+        # ------------------------------
     }
     if include_comments:
         payload["comments"] = [_serialize_comment(c) for c in comments_rel]
@@ -198,6 +286,26 @@ async def create_post(current_user, body) -> dict:
             raise AppException(400, "appreciationTypeId and recipientIds are required for appreciation posts")
         # Silently deduplicate: remove recipients from normal tags
         body.taggedUserIds = [uid for uid in body.taggedUserIds if uid not in body.recipientIds]
+
+    if body.type == PostType.POLL:
+        if body.taggedUserIds:
+            raise AppException(400, "Polls do not support tagging users")
+        if body.media:
+            raise AppException(400, "Polls do not support media")
+        if not body.caption or not body.caption.strip():
+            raise AppException(400, "Poll question (caption) is required")
+        if not (POLL_MIN_OPTIONS <= len(body.pollOptions) <= POLL_MAX_OPTIONS):
+            raise AppException(
+                400, f"Poll must have between {POLL_MIN_OPTIONS} and {POLL_MAX_OPTIONS} options"
+            )
+        cleaned_options = [o.strip() for o in body.pollOptions]
+        if any(not o for o in cleaned_options):
+            raise AppException(400, "Poll options cannot be empty")
+        if len(set(o.lower() for o in cleaned_options)) != len(cleaned_options):
+            raise AppException(400, "Poll options must be unique")
+        body.pollOptions = cleaned_options
+        if body.pollClosesAt and body.pollClosesAt <= datetime.now(timezone.utc):
+            raise AppException(400, "Poll closing time must be in the future")
 
     for m in body.media:
         storage_service.assert_allowed_post_media_url(m.url)
@@ -238,9 +346,14 @@ async def create_post(current_user, body) -> dict:
 
     now = datetime.now(timezone.utc)
 
+    # Polls feed caption + option text through moderation as one combined string.
+    moderation_text = body.caption or ""
+    if body.type == PostType.POLL and body.pollOptions:
+        moderation_text = (moderation_text + " " + " | ".join(body.pollOptions)).strip()
+
     # ── Step A0/A/B — Static + custom blacklist (no AI call) ──
-    if body.caption:
-        blacklist_hit = await check_blacklist(body.caption)
+    if moderation_text:
+        blacklist_hit = await check_blacklist(moderation_text)
         if blacklist_hit:
             await db.post.update(
                 where={"id": post.id},
@@ -250,6 +363,7 @@ async def create_post(current_user, body) -> dict:
                 post_id=post.id,
                 author_id=current_user.id,
                 flagged_phrase=blacklist_hit,
+                extra_flag_details=_build_poll_flag_details(body) if body.type == PostType.POLL else None,
             )
             post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
             return _serialize_post(post, current_user.id, include_comments=False)
@@ -260,7 +374,7 @@ async def create_post(current_user, body) -> dict:
     try:
         (text_score, text_category, text_phrase, text_confidence), \
         (image_score, image_reason) = await asyncio.gather(
-            scan_text(body.caption) if body.caption else _noop_text_scan(),
+            scan_text(moderation_text) if moderation_text else _noop_text_scan(),
             scan_images(image_urls) if image_urls else _noop_image_scan(),
         )
     except Exception as e:
@@ -276,10 +390,9 @@ async def create_post(current_user, body) -> dict:
             post = await db.post.update(
                 where={"id": post.id},
                 data={"status": ContentStatus.PUBLISHED},
-                include=FEED_INCLUDE, # <--- CHANGED
+                include=FEED_INCLUDE,
             )
-            
-            # --- NEW BLOCK ---
+
             if body.type == PostType.APPRECIATION:
                 await _materialize_appreciation(
                     post_id=post.id,
@@ -287,14 +400,18 @@ async def create_post(current_user, body) -> dict:
                     appreciation_type_id=body.appreciationTypeId,
                     recipient_ids=body.recipientIds
                 )
-            # -----------------
-            
+            elif body.type == PostType.POLL:
+                await _materialize_poll(
+                    post_id=post.id,
+                    creator_id=current_user.id,
+                    option_texts=body.pollOptions,
+                    closes_at=body.pollClosesAt,
+                )
+
             await _write_published_audit(post, current_user.id, text_score, image_score)
-            
-            # --- NEW LINE (Refetch to get nested appreciation) ---
+
             post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
             return _serialize_post(post, current_user.id, include_comments=False)
-
 
         note = (
             f"Whitelisted term ('{text_phrase}') — AI flagged anyway "
@@ -319,6 +436,7 @@ async def create_post(current_user, body) -> dict:
                 "reason":      FlagReason.NSFW_TEXT.value,
                 "appreciationTypeId": body.appreciationTypeId if body.type == PostType.APPRECIATION else None,
                 "recipientIds": body.recipientIds if body.type == PostType.APPRECIATION else None,
+                **(_build_poll_flag_details(body) if body.type == PostType.POLL else {}),
                 "category":    text_category,
                 "confidence":  text_confidence,
             },
@@ -360,6 +478,7 @@ async def create_post(current_user, body) -> dict:
                 "reason":      FlagReason.NSFW_IMAGE.value,
                 "appreciationTypeId": body.appreciationTypeId if body.type == PostType.APPRECIATION else None,
                 "recipientIds": body.recipientIds if body.type == PostType.APPRECIATION else None,
+                **(_build_poll_flag_details(body) if body.type == PostType.POLL else {}),
             },
             flagged_phrase=None,
         )
@@ -383,10 +502,9 @@ async def create_post(current_user, body) -> dict:
     post = await db.post.update(
         where={"id": post.id},
         data={"status": ContentStatus.PUBLISHED},
-        include=FEED_INCLUDE, # <--- CHANGED
+        include=FEED_INCLUDE,
     )
-    
-    # --- NEW BLOCK ---
+
     if body.type == PostType.APPRECIATION:
         await _materialize_appreciation(
             post_id=post.id,
@@ -394,11 +512,16 @@ async def create_post(current_user, body) -> dict:
             appreciation_type_id=body.appreciationTypeId,
             recipient_ids=body.recipientIds
         )
-    # -----------------
-    
+    elif body.type == PostType.POLL:
+        await _materialize_poll(
+            post_id=post.id,
+            creator_id=current_user.id,
+            option_texts=body.pollOptions,
+            closes_at=body.pollClosesAt,
+        )
+
     await _write_published_audit(post, current_user.id, text_score, image_score)
-    
-    # --- NEW LINE (Refetch to get nested appreciation) ---
+
     post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
     return _serialize_post(post, current_user.id, include_comments=False)
 
@@ -467,6 +590,51 @@ async def _materialize_appreciation(post_id: str, sender_id: str, appreciation_t
         }
     )
 
+async def _materialize_poll(
+    post_id: str,
+    creator_id: str,
+    option_texts: list[str],
+    closes_at: datetime | None = None,
+):
+    """
+    Standalone/importable — same pattern as _materialize_appreciation.
+    Called from create_post on a clean publish, AND from alert_service's
+    resolve_alert() for late materialization when an admin restores a
+    previously flagged or auto-removed poll.
+    """
+    poll = await db.poll.create(
+        data={
+            "postId": post_id,
+            "creatorId": creator_id,
+            "closesAt": closes_at,
+            "options": {
+                "create": [
+                    {"text": text, "order": idx}
+                    for idx, text in enumerate(option_texts)
+                ]
+            },
+        },
+        include={"options": {"order_by": {"order": "asc"}}},
+    )
+
+    from services.audit_service import write_audit_log
+    await write_audit_log(
+        event_type=AuditEventType.POLL_CREATED,
+        actor_type=AuditActorType.USER,
+        actor_id=creator_id,
+        entity_type=AuditEntityType.POLL,
+        entity_id=poll.id,
+        parent_entity_type=AuditEntityType.POST,
+        parent_entity_id=post_id,
+        metadata={
+            "creatorId": creator_id,
+            "optionCount": len(option_texts),
+            "closesAt": closes_at.isoformat() if closes_at else None,
+        },
+    )
+    return poll
+
+
 async def get_feed(
     current_user,
     cursor: str | None = None,
@@ -502,12 +670,26 @@ async def get_feed(
     next_cursor = posts[-1].id if has_more else None 
     post_ids = [p.id for p in posts]
     comment_counts = await _comment_counts_for_posts(post_ids)
+
+    # --- NEW: Fetch user poll votes for feed ---
+    poll_ids = [
+        p.poll.id for p in posts
+        if getattr(p, "type", None) == PostType.POLL and getattr(p, "poll", None)
+    ]
+    poll_votes_map = await _user_poll_votes(poll_ids, current_user.id)
+    # -------------------------------------------
+
     return FeedResponse(
         posts=[
             _serialize_post(
                 p,
                 current_user.id,
                 comment_count=comment_counts.get(p.id, 0),
+                user_vote_option_id=(
+                    poll_votes_map.get(p.poll.id)
+                    if getattr(p, "type", None) == PostType.POLL and getattr(p, "poll", None)
+                    else None
+                ),
             )
             for p in posts
         ],
@@ -525,17 +707,34 @@ async def get_post(current_user, post_id: str) -> dict:
         raise AppException(404, "Post not found")
     if post.status == ContentStatus.REMOVED:
         raise AppException(404, "Post not found")
-    return _serialize_post(post, current_user.id, include_comments=True)
+        
+    # --- NEW: Fetch user poll vote ---
+    user_vote_option_id = None
+    if post.type == PostType.POLL and getattr(post, "poll", None):
+        user_vote_option_id = await _single_user_poll_vote(post.poll.id, current_user.id)
+    # ---------------------------------
+    
+    return _serialize_post(
+        post, current_user.id, include_comments=True, user_vote_option_id=user_vote_option_id
+    )
 
 
 async def update_post(current_user, post_id: str, body) -> dict:
-    post = await db.post.find_unique(where={"id": post_id})
+    post = await db.post.find_unique(
+        where={"id": post_id},
+        include={"poll": {"include": {"options": {"order_by": {"order": "asc"}}}}},
+    )
     if not post or post.deletedAt is not None:
         raise AppException(404, "Post not found")
     if post.status == ContentStatus.REMOVED:
         raise AppException(400, "Post is removed")
     if post.authorId != current_user.id:
         raise AppException(403, "You can only edit your own posts")
+
+    # --- NEW: Delegate to poll update logic ---
+    if post.type == PostType.POLL:
+        return await _update_poll_post(current_user, post, body)
+    # ------------------------------------------
 
     updated = await db.post.update(
         where={"id": post_id},
@@ -548,6 +747,77 @@ async def update_post(current_user, post_id: str, body) -> dict:
     return _serialize_post(updated, current_user.id, include_comments=True)
 
 
+async def _update_poll_post(current_user, post, body) -> dict:
+    """
+    Since the spec explicitly requires poll caption + options to go through 
+    moderation "just like creation", this path adds synchronous moderation 
+    that did not exist before for posts in general. Edits that fail moderation 
+    are rejected outright (400).
+    """
+    poll = getattr(post, "poll", None)
+    if not poll:
+        raise AppException(400, "Poll data not found for this post")
+
+    new_caption = body.caption if body.caption is not None else post.caption
+    if not new_caption or not new_caption.strip():
+        raise AppException(400, "Poll question (caption) is required")
+
+    existing_options = sorted(poll.options, key=lambda o: o.order)
+
+    if body.pollOptions is not None:
+        if len(body.pollOptions) != len(existing_options):
+            raise AppException(400, "Cannot add or remove poll options — only option text can be edited")
+        cleaned = [o.strip() for o in body.pollOptions]
+        if any(not o for o in cleaned):
+            raise AppException(400, "Poll options cannot be empty")
+        if len(set(o.lower() for o in cleaned)) != len(cleaned):
+            raise AppException(400, "Poll options must be unique")
+        new_option_texts = cleaned
+    else:
+        new_option_texts = [o.text for o in existing_options]
+
+    moderation_text = (new_caption + " " + " | ".join(new_option_texts)).strip()
+
+    blacklist_hit = await check_blacklist(moderation_text)
+    if blacklist_hit:
+        raise AppException(400, "Your edit contains restricted content and cannot be saved")
+
+    try:
+        text_score, _, _, _ = await scan_text(moderation_text)
+    except Exception as e:
+        print(f"[moderation] poll edit scan failed for post {post.id}: {e}")
+        raise AppException(503, "Edit could not be processed. Please try again.")
+
+    if text_score >= MODERATION_REVIEW_THRESHOLD:
+        raise AppException(400, "Your edit was flagged by our content filter and cannot be saved. Please revise.")
+
+    now = datetime.now(timezone.utc)
+    await db.post.update(
+        where={"id": post.id},
+        data={"caption": new_caption, "captionEditedAt": now},
+    )
+    for option, new_text in zip(existing_options, new_option_texts):
+        if option.text != new_text:
+            await db.polloption.update(where={"id": option.id}, data={"text": new_text})
+
+    await write_audit_log(
+        event_type=AuditEventType.POLL_OPTIONS_OR_CAPTION_EDITED,
+        actor_type=AuditActorType.USER,
+        actor_id=current_user.id,
+        entity_type=AuditEntityType.POLL,
+        entity_id=poll.id,
+        parent_entity_type=AuditEntityType.POST,
+        parent_entity_id=post.id,
+        metadata={"newCaption": new_caption[:80], "optionCount": len(new_option_texts)},
+    )
+
+    updated = await db.post.find_unique(where={"id": post.id}, include=POST_INCLUDE)
+    user_vote_option_id = await _single_user_poll_vote(poll.id, current_user.id)
+    return _serialize_post(
+        updated, current_user.id, include_comments=True, user_vote_option_id=user_vote_option_id
+    )
+
+
 async def delete_post(current_user, post_id: str) -> dict:
     post = await db.post.find_unique(where={"id": post_id})
     if not post or post.deletedAt is not None:
@@ -558,13 +828,20 @@ async def delete_post(current_user, post_id: str) -> dict:
         raise AppException(403, "You can only delete your own posts")
 
     now = datetime.now(timezone.utc)
-    # --- NEW BLOCK ---
+    
     if post.type == PostType.APPRECIATION:
         await db.appreciation.update_many(
             where={"postId": post.id},
             data={"deletedAt": now}
         )
-    # -----------------
+    # --- NEW: Soft-delete poll cascade ---
+    elif post.type == PostType.POLL:
+        await db.poll.update_many(
+            where={"postId": post.id},
+            data={"deletedAt": now}
+        )
+    # -------------------------------------
+    
     await db.post.update(
         where={"id": post_id},
         data={
@@ -581,6 +858,7 @@ async def delete_post(current_user, post_id: str) -> dict:
         entity_id=post_id,
     )
     return DeletePostResponse(deletedPostId=post_id).model_dump(mode="json")
+
 
 
 # ── Likes ─────────────────────────────────────────────────────

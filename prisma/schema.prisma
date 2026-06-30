@@ -54,6 +54,8 @@ model User {
   resolvedAlerts        AdminAlert[]            @relation("AlertsResolvedBy")
   blacklistEntries      ModerationBlacklist[]   @relation("BlacklistAddedBy")
   whitelistEntries      ModerationWhitelist[]   @relation("WhitelistAddedBy")
+  pollsCreated          Poll[]                  @relation("PollCreator")  
+  pollVotes             PollVote[]              @relation("PollVotes")
 
   // Every audit log row where this user was the actor (actorType USER or ADMIN)
   auditLogs     AuditLog[]         @relation("AuditActor")
@@ -81,6 +83,7 @@ enum PostType {
   SYSTEM_BIRTHDATE
   SYSTEM_ANNIVERSARY
   LINKEDIN_IMPORT
+  POLL
 }
 
 // Applies to both Post and Comment
@@ -123,7 +126,8 @@ model Post {
   likes    Like[]
   comments Comment[]
   alerts   AdminAlert[]
-  appreciation Appreciation? 
+  appreciation Appreciation?
+  poll         Poll? 
 
   @@index([status, deletedAt, createdAt(sort: Desc)])
   @@index([authorId, status, deletedAt])
@@ -358,6 +362,8 @@ enum AuditEntityType {
   APPRECIATION_TYPE
   ALERT
   INVITATION
+  POLL
+  POLL_VOTE     
 }
 
 enum AuditEventType {
@@ -423,6 +429,15 @@ enum AuditEventType {
   USER_PURGED_BY_JOB
   SYSTEM_BIRTHDAY_POST_CREATED
   SYSTEM_ANNIVERSARY_POST_CREATED
+  
+  // ── Polls ──────────────────────────────────────────────────
+  POLL_CREATED
+  POLL_VOTE_CAST
+  POLL_OPTIONS_OR_CAPTION_EDITED
+  POLL_CLOSED_MANUALLY
+  POLL_REOPENED_MANUALLY
+  POLL_EXTENDED
+  POLL_DELETED_BY_AUTHOR   // reserved for future use, not currently fired — see note below
 }
 
 // ============================================================
@@ -474,4 +489,62 @@ model UserNotification {
   @@index([recipientId, createdAt(sort: Desc)])
   @@index([recipientId, readAt])
   @@map("user_notifications")
+}
+
+// ============================================================
+// POLL MODELS
+// ============================================================
+
+model Poll {
+  id               String    @id @default(cuid())
+  postId           String    @unique @map("post_id")
+  creatorId        String    @map("creator_id")
+  closesAt         DateTime? @map("closes_at")
+  isManuallyClosed Boolean   @default(false) @map("is_manually_closed")
+  manuallyClosedAt DateTime? @map("manually_closed_at")
+  deletedAt        DateTime? @map("deleted_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  post    Post         @relation(fields: [postId], references: [id], onDelete: Cascade)
+  creator User         @relation("PollCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  options PollOption[]
+  votes   PollVote[]
+
+  @@index([creatorId])
+  @@index([deletedAt])
+  @@map("polls")
+}
+
+model PollOption {
+  id        String   @id @default(cuid())
+  pollId    String   @map("poll_id")
+  text      String
+  order     Int      @default(0)
+  voteCount Int      @default(0) @map("vote_count")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  poll  Poll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  votes PollVote[]
+
+  @@index([pollId])
+  @@map("poll_options")
+}
+
+model PollVote {
+  id        String   @id @default(cuid())
+  pollId    String   @map("poll_id")
+  optionId  String   @map("option_id")
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  poll   Poll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  option PollOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  user   User       @relation("PollVotes", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([pollId, userId])
+  @@index([optionId])
+  @@map("poll_votes")
 }

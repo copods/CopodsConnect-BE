@@ -9,7 +9,7 @@ from middlewares.auth import require_admin
 from datetime import datetime, timezone
 
 from middlewares.auth import get_current_user, require_platform
-from services.app import post_service
+from services.app import post_service, poll_service
 from utils.ApiResponse import api_response
 from constants import DEFAULT_PAGE_SIZE
 from prisma.enums import PostType
@@ -20,10 +20,12 @@ from models.schemas.app.posts import (
     CreateCommentRequest,
     UpdateCommentRequest,
     LikePostRequest,
-    MediaUploadUrlRequest,  # add
+    MediaUploadUrlRequest,
     MediaUploadUrlResponse,
-    LikePostRequest,
+    CastVoteRequest,
+    ExtendPollRequest,
 )
+
 
 posts_router = APIRouter(
     prefix="/app/posts",
@@ -165,3 +167,42 @@ async def delete_comment(
 ):
     result = await post_service.delete_comment(current_user, comment_id)
     return api_response(200, result, "Comment deleted successfully")
+
+# ── Polls ─────────────────────────────────────────────────────
+
+@posts_router.post("/{post_id}/vote")
+async def cast_vote(
+    post_id: str,
+    body: CastVoteRequest,
+    current_user=Depends(get_current_user),
+):
+    result = await poll_service.cast_vote(current_user, post_id, body.optionId)
+    return api_response(200, result, "Vote recorded")
+
+
+@posts_router.patch("/{post_id}/close")
+async def close_poll(
+    post_id: str,
+    current_user=Depends(get_current_user),
+):
+    result = await poll_service.close_poll(current_user, post_id)
+    return api_response(200, result, "Poll closed")
+
+
+@posts_router.patch("/{post_id}/reopen")
+async def reopen_poll(
+    post_id: str,
+    current_user=Depends(get_current_user),
+):
+    result = await poll_service.reopen_poll(current_user, post_id)
+    return api_response(200, result, "Poll reopened")
+
+
+@posts_router.patch("/{post_id}/extend")
+async def extend_poll(
+    post_id: str,
+    body: ExtendPollRequest,
+    current_user=Depends(get_current_user),
+):
+    result = await poll_service.extend_poll(current_user, post_id, body.newClosesAt)
+    return api_response(200, result, "Poll deadline extended")

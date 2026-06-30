@@ -11,8 +11,10 @@ class CreatePostRequest(BaseModel):
     type: PostType = PostType.USER_POST
     media: list["MediaItem"] = []
     taggedUserIds: list[str] = []
-    appreciationTypeId: Optional[str] = None # NEW
-    recipientIds: list[str] = [] # NEW
+    appreciationTypeId: Optional[str] = None 
+    recipientIds: list[str] = [] 
+    pollOptions: list[str]=[]         # NEW — required for type=POLL, 2-5 entries
+    pollClosesAt: Optional[datetime] = None  # NEW — optional deadline, must be in the future
 
 
 class MediaItem(BaseModel):
@@ -32,6 +34,10 @@ class MediaUploadUrlResponse(BaseModel):
 
 class UpdatePostRequest(BaseModel):
     caption: Optional[str] = None
+    pollOptions:Optional[list[str]] = None # NEW — only for editing a poll's option text;
+                                                   # must match the existing option count exactly,
+                                                   # adding/removing options is not supported
+
 
 class CreateCommentRequest(BaseModel):
     body: str
@@ -44,6 +50,12 @@ class UpdateCommentRequest(BaseModel):
 
 class LikePostRequest(BaseModel):
     reactionType: Optional[str]= "LIKE"
+
+class CastVoteRequest(BaseModel):
+    optionId:str
+
+class ExtendPollRequest(BaseModel):
+    newClosesAt: datetime
 
 # ── Response schemas ──────────────────────────────────────────
 
@@ -106,6 +118,29 @@ class AppreciationOut(BaseModel):
     recipients: list["TagOut"] = []
     model_config = ConfigDict(from_attributes=True)
 
+# NEW - poll response models 
+class PollOptionOut(BaseModel):
+    id:str 
+    text:str
+    order:int
+    voteCount: int = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+class PollOut(BaseModel): 
+    id:str 
+    closesAt: Optional[datetime] = None
+    isManuallyClosed: bool = False
+    manuallyClosedAt: Optional[datetime] = None
+    isOpen: bool = True
+    totalVotes: int = 0
+    userVoteOptionId: Optional[str] = None
+    options: list[PollOptionOut] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+
 class PostOut(BaseModel):
     id: str
     type: PostType
@@ -122,7 +157,8 @@ class PostOut(BaseModel):
     likeCount: int = 0
     commentCount: int = 0
     isLikedByMe: bool = False
-    appreciation: Optional[AppreciationOut] = None # NEW4
+    appreciation: Optional[AppreciationOut] = None # NEW
+    poll: Optional[PollOut] = None
     reactionType:Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
