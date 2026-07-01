@@ -131,7 +131,7 @@ async def close_poll(current_user, post_id: str) -> dict:
         entity_id=poll.id,
         parent_entity_type=AuditEntityType.POST,
         parent_entity_id=post_id,
-        metadata={"closedByRole": current_user.role.value},
+        metadata={"closedByRole": getattr(current_user.role, "value", current_user.role)},
     )
     return await _serialized_poll_post(post_id, current_user.id)
 
@@ -154,7 +154,7 @@ async def reopen_poll(current_user, post_id: str) -> dict:
         entity_id=poll.id,
         parent_entity_type=AuditEntityType.POST,
         parent_entity_id=post_id,
-        metadata={"reopenedByRole": current_user.role.value},
+        metadata={"reopenedByRole": getattr(current_user.role, "value", current_user.role)},
     )
     return await _serialized_poll_post(post_id, current_user.id)
 

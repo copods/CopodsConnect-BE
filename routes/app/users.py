@@ -61,3 +61,41 @@ async def update_my_picture(
     """
     result = await user_service.update_user_profile_picture(current_user.id, body)
     return api_response(200, result, "Profile picture updated successfully")
+
+@app_users_router.get("/{target_user_id}")
+async def get_user_profile(
+    target_user_id: str,
+    current_user=Depends(get_current_user),
+):
+    """Fetch another user's highly optimized public profile details."""
+    from db.client import db
+    from utils.exceptions import AppException
+
+    user = await db.user.find_unique(
+        where={"id": target_user_id, "deletedAt": None}
+    )
+    if not user:
+        raise AppException(404, "User not found")
+        
+    # Count appreciations directly in the endpoint
+    sent_count = await db.appreciation.count(
+        where={"senderId": user.id, "deletedAt": None}
+    )
+    received_count = await db.appreciationrecipient.count(
+        where={"userId": user.id, "appreciation": {"deletedAt": None}}
+    )
+    
+    # Send ONLY the exact data points you requested!
+    public_profile_data = {
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "picture": user.picture,
+        "designation": user.designation,
+        "dateOfJoining": user.dateOfJoining.isoformat() if user.dateOfJoining else None,
+        "birthdate": user.birthdate.isoformat() if user.birthdate else None,
+        "appreciationGivenCount": sent_count,
+        "appreciationReceivedCount": received_count
+    }
+    
+    return api_response(200, public_profile_data, "User fetched successfully")

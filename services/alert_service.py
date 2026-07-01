@@ -310,8 +310,8 @@ async def resolve_alert(alert_id: str, action: AlertAction, resolved_by_id: str)
             "commentId":       alert.commentId,
             "flaggedPhrase":   alert.flaggedPhrase,
             "flagReason": (
-                updated_content.flagReason.value
-                if updated_content and updated_content.flagReason
+                getattr(updated_content.flagReason, "value", updated_content.flagReason)
+                if updated_content and hasattr(updated_content, "flagReason") and updated_content.flagReason
                 else None
             ),
         },

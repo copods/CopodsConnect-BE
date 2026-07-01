@@ -3,7 +3,7 @@ import asyncio
 from datetime import datetime, timezone
 from services.audit_service import write_audit_log
 from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
-
+from services.app.appreciation_service import _validate_recipients
 from db.client import db
 from prisma.enums import PostType, ContentStatus, FlagReason
 from utils.exceptions import AppException
@@ -61,7 +61,7 @@ POST_INCLUDE = {
     "appreciation": {  
         "include": {
             "appreciationType": True,
-            "recipients": {"include": {"recipient": True}}
+            "recipients": {"include": {"user": True}}
         }
     },
     "poll": { # NEW
@@ -79,7 +79,7 @@ FEED_INCLUDE = {
     "appreciation": {  # NEW
         "include": {
             "appreciationType": True,
-            "recipients": {"include": {"recipient": True}}
+            "recipients": {"include": {"user": True}}
         }
     },
     "poll": { # NEW
@@ -256,9 +256,9 @@ def _serialize_post(
             "recipients": [
                 {
                     "id": r.id,
-                    "taggedUserId": r.recipientId,
-                    "taggedUserName": r.recipient.name,
-                    "taggedUserPicture": r.recipient.picture
+                    "taggedUserId": r.userId,
+                    "taggedUserName": r.user.name,
+                    "taggedUserPicture": r.user.picture
                 } for r in post.appreciation.recipients
             ]
         } if getattr(post, "type", None) == PostType.APPRECIATION and getattr(post, "appreciation", None) else None,
@@ -284,6 +284,11 @@ async def create_post(current_user, body) -> dict:
     if body.type == PostType.APPRECIATION:
         if not body.appreciationTypeId or not body.recipientIds:
             raise AppException(400, "appreciationTypeId and recipientIds are required for appreciation posts")
+        
+        #Add validations to ensure that the recipients are valid adn exist in the DB.
+        
+        await _validate_recipients(body.recipientIds, current_user.id)
+
         # Silently deduplicate: remove recipients from normal tags
         body.taggedUserIds = [uid for uid in body.taggedUserIds if uid not in body.recipientIds]
 
@@ -567,7 +572,7 @@ async def _materialize_appreciation(post_id: str, sender_id: str, appreciation_t
             "senderId": sender_id,
             "appreciationTypeId": appreciation_type_id,
             "recipients": {
-                "create": [{"recipientId": rid} for rid in recipient_ids]
+                "create": [{"userId": rid} for rid in recipient_ids]
             }
         },
         include={"appreciationType": True}

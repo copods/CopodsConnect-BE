@@ -1,7 +1,8 @@
 # routes/appreciation_types.py
 from typing import List
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, UploadFile, File
+
 
 from middlewares.auth import require_admin
 from models.schemas.appreciation_types import AppreciationTypeOut
