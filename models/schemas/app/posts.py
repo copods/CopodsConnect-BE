@@ -57,6 +57,27 @@ class CastVoteRequest(BaseModel):
 class ExtendPollRequest(BaseModel):
     newClosesAt: datetime
 
+class PollVoterOut(BaseModel):
+    id: str
+    name: Optional[str] = None
+    picture: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+class PollOptionVotersOut(BaseModel):
+    id: str
+    text: str
+    order: int
+    voteCount: int = 0
+    voters: list[PollVoterOut] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+class PollVotersResponse(BaseModel):
+    postId: str
+    pollId: str
+    options: list[PollOptionVotersOut] = []
+
 # ── Response schemas ──────────────────────────────────────────
 
 class MediaOut(BaseModel):

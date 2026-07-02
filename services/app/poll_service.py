@@ -110,6 +110,54 @@ async def cast_vote(current_user, post_id: str, option_id: str) -> dict:
     return await _serialized_poll_post(post_id, current_user.id)
 
 
+async def get_poll_voters(current_user, post_id: str) -> dict:
+    post, poll = await _get_post_and_poll(post_id)
+    if post.status != ContentStatus.PUBLISHED:
+        raise AppException(400, "This poll is not available")
+
+    poll_with_options = await db.poll.find_unique(
+        where={"id": poll.id},
+        include={"options": {"order_by": {"order": "asc"}}},
+    )
+    if not poll_with_options:
+        raise AppException(404, "Poll not found")
+
+    votes = await db.pollvote.find_many(
+        where={"pollId": poll.id},
+        include={"user": True},
+        order={"createdAt": "asc"},
+    )
+
+    voters_by_option: dict[str, list[dict]] = {
+        o.id: [] for o in poll_with_options.options
+    }
+    for vote in votes:
+        if vote.user is None:
+            continue
+        voters_by_option.setdefault(vote.optionId, []).append(
+            {
+                "id": vote.user.id,
+                "name": vote.user.name,
+                "picture": vote.user.picture,
+            }
+        )
+
+    return {
+        "postId": post_id,
+        "pollId": poll.id,
+        "options": [
+            {
+                "id": o.id,
+                "text": o.text,
+                "order": o.order,
+                "voteCount": o.voteCount,
+                "voters": voters_by_option.get(o.id, []),
+            }
+            for o in poll_with_options.options
+        ],
+    }
+
+
 # ── Close / Reopen / Extend ──────────────────────────────────
 
 async def close_poll(current_user, post_id: str) -> dict:

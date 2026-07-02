@@ -1,4 +1,5 @@
 # models/schemas/app/users.py
+from datetime import datetime
 from pydantic import BaseModel
 from typing import Optional
 
@@ -7,8 +8,7 @@ class AppEditProfileTextRequest(BaseModel):
     """IN — editable text fields for the logged-in app user's own profile."""
     name: Optional[str] = None
     designation: Optional[str] = None
-    # birthdate and dateOfJoining are intentionally excluded —
-    # only admins may set those to prevent date abuse.
+    birthdate: Optional[datetime] = None
 
 
 class AppProfilePictureUploadUrlRequest(BaseModel):
