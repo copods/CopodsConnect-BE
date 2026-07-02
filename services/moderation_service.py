@@ -279,6 +279,10 @@ PROFANITY — NOT a violation:
 PROFANITY — IS a violation:
   Severe slurs or explicit profanity directed at people
 
+- GIBBERISH vs OBFUSCATION: 
+  Do NOT flag harmless keyboard mashing, meaningless gibberish, or innocent typos (e.g., "asdfghjkl" or "Ydycuhinij"). 
+  HOWEVER, if the gibberish is clearly being used to disguise, obfuscate, or bypass filters for actual profanity, slurs, or hate speech, you MUST flag it.
+
 IMPORTANT RULES:
 1. Judge by the most likely real-world interpretation in a professional Indian workplace, not the worst-case reading.
 2. Venting and frustration are normal — flag only when there is clear intent to harm, humiliate, or threaten.
