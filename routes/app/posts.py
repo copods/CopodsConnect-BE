@@ -24,6 +24,7 @@ from models.schemas.app.posts import (
     MediaUploadUrlResponse,
     CastVoteRequest,
     ExtendPollRequest,
+    PollVotersResponse,
 )
 
 
@@ -178,6 +179,15 @@ async def cast_vote(
 ):
     result = await poll_service.cast_vote(current_user, post_id, body.optionId)
     return api_response(200, result, "Vote recorded")
+
+
+@posts_router.get("/{post_id}/poll-voters", response_model=PollVotersResponse)
+async def get_poll_voters(
+    post_id: str,
+    current_user=Depends(get_current_user),
+):
+    result = await poll_service.get_poll_voters(current_user, post_id)
+    return api_response(200, result, "Poll voters retrieved")
 
 
 @posts_router.patch("/{post_id}/close")

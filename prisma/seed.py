@@ -14,6 +14,7 @@ APPRECIATION_TYPES = [
         "emojiPath": "assets/appreciation-emojis/team_player.svg",
         "badgePath": "assets/appreciation-badges/team_player.png",
         "displayOrder": 1,
+        "badgePath": "assets/appreciation-badges/team_player.png",
     },
     {
         "name": "Problem Solver",
@@ -21,6 +22,7 @@ APPRECIATION_TYPES = [
         "emojiPath": "assets/appreciation-emojis/problem_solver.svg",
         "badgePath": "assets/appreciation-badges/problem_solver.png",
         "displayOrder": 2,
+        "badgePath": "assets/appreciation-badges/problem_solver.png",
     },
     {
         "name": "Above & Beyond",
@@ -28,6 +30,7 @@ APPRECIATION_TYPES = [
         "emojiPath": "assets/appreciation-emojis/above_and_beyond.svg",
         "badgePath": "assets/appreciation-badges/above_and_beyond.png",
         "displayOrder": 3,
+        "badgePath": "assets/appreciation-badges/above_and_beyond.png",
     },
     {
         "name": "Great Mentor",
@@ -35,6 +38,7 @@ APPRECIATION_TYPES = [
         "emojiPath": "assets/appreciation-emojis/great_mentor.svg",
         "badgePath": "assets/appreciation-badges/great_mentor.png",
         "displayOrder": 4,
+        "badgePath": "assets/appreciation-badges/great_mentor.png",
     },
     {
         "name": "Creative Thinker",
@@ -42,6 +46,7 @@ APPRECIATION_TYPES = [
         "emojiPath": "assets/appreciation-emojis/creative_thinker.svg",
         "badgePath": "assets/appreciation-badges/creative_thinker.png",
         "displayOrder": 5,
+        "badgePath": "assets/appreciation-badges/creative_thinker.png",
     },
     {
         "name": "Reliable Rock",
@@ -49,6 +54,7 @@ APPRECIATION_TYPES = [
         "emojiPath": "assets/appreciation-emojis/reliable_rock.svg",
         "badgePath": "assets/appreciation-badges/reliable_rock.png",
         "displayOrder": 6,
+        "badgePath": "assets/appreciation-badges/reliable_rock.png",
     },
     {
         "name": "Clutch Performer",
@@ -56,6 +62,7 @@ APPRECIATION_TYPES = [
         "emojiPath": "assets/appreciation-emojis/clutch_performer.svg",
         "badgePath": "assets/appreciation-badges/clutch_performer.png",
         "displayOrder": 7,
+        "badgePath": "assets/appreciation-badges/clutch_performer.png",
     },
     {
         "name": "Customer Champion",
@@ -63,6 +70,7 @@ APPRECIATION_TYPES = [
         "emojiPath": "assets/appreciation-emojis/customer_champion.svg",
         "badgePath": "assets/appreciation-badges/customer_champion.png",
         "displayOrder": 8,
+        "badgePath": "assets/appreciation-badges/customer_champion.png",
     },
     {
         "name": "Quick Learner",
@@ -70,6 +78,7 @@ APPRECIATION_TYPES = [
         "emojiPath": "assets/appreciation-emojis/quick_learner.svg",
         "badgePath": "assets/appreciation-badges/quick_learner.png",
         "displayOrder": 9,
+        "badgePath": "assets/appreciation-badges/quick_learner.png",
     },
     {
         "name": "Event Champion",
@@ -77,13 +86,15 @@ APPRECIATION_TYPES = [
         "emojiPath": "assets/appreciation-emojis/event_champion.svg",
         "badgePath": "assets/appreciation-badges/event_champion.png",
         "displayOrder": 10,
+        "badgePath": "assets/appreciation-badges/event_champion.png",
     },
     {
-        "name": "Helping Hand",
+        "name": "Lifeline",
         "description": "Always there for colleagues personally — supportive, kind, and genuinely caring.",
         "emojiPath": "assets/appreciation-emojis/lifeline.svg",
         "badgePath": "assets/appreciation-badges/lifeline.png",
         "displayOrder": 11,
+        "badgePath": "assets/appreciation-badges/lifeline.png",
     },
     {
         "name": "Office Heartbeat",
@@ -91,6 +102,7 @@ APPRECIATION_TYPES = [
         "emojiPath": "assets/appreciation-emojis/office_heartbeat.svg",
         "badgePath": "assets/appreciation-badges/office_heartbeat.png",
         "displayOrder": 12,
+        "badgePath": "assets/appreciation-badges/office_heartbeat.png",
     },
 ]
 
