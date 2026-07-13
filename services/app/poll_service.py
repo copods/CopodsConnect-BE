@@ -234,3 +234,60 @@ async def extend_poll(current_user, post_id: str, new_closes_at: datetime) -> di
         },
     )
     return await _serialized_poll_post(post_id, current_user.id)
+
+async def remove_vote(current_user, post_id:str)-> dict:
+    post = await db.post.find_unique(
+        where={"id":post_id},
+        include={
+            "poll":{
+                "include":{
+                    "options":True
+                }
+            }
+        }
+    )
+
+    if not post or post.deletedAt is not None:
+        raise AppException(404, "Post not found")
+    
+    if post.type != PostType.POLL:
+        raise AppException(400,"This post is not a poll")
+    
+    if post.status != ContentStatus.PUBLISHED:
+        raise AppException(400,"This poll is not available")
+    
+    poll = post.poll
+    if not poll or poll.deletedAt is not None:
+        raise AppException(404, "Poll not found")
+    
+    if not post_service._is_poll_open(poll):
+        raise AppException(409,"This poll is closed")
+    
+    existing_vote = await db.pollvote.find_first(
+        where={
+            "pollId": poll.id, 
+            "userId": current_user.id
+        }
+    )
+
+    if not existing_vote:
+        raise AppException(400, "You have not voted on this poll")
+
+    async with db.tx() as tx:
+    # Decrement the count on the option they had voted for 
+        await tx.polloption.update(
+            where={
+                "id":existing_vote.optionId
+            },
+            data={
+                "voteCount":{"decrement":1}
+            },
+        )
+        
+        # Delete their vote record 
+        await tx.pollvote.delete(
+            where={"id":existing_vote.id}
+        )
+
+    # Note : we omit the audit log here as Poll_Vote_Removed does not exist in the prisma shcema enum currently. 
+    return await _serialized_poll_post(post_id, current_user.id)

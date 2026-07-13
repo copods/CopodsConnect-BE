@@ -216,3 +216,11 @@ async def extend_poll(
 ):
     result = await poll_service.extend_poll(current_user, post_id, body.newClosesAt)
     return api_response(200, result, "Poll deadline extended")
+
+@posts_router.delete("/{post_id}/vote")
+async def remove_vote(
+    post_id:str,
+    current_user=Depends(get_current_user)
+):
+    result = await poll_service.remove_vote(current_user, post_id)
+    return api_response(200, result, "Vote removed")
