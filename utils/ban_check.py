@@ -1,7 +1,7 @@
 # utils/ban_check.py
 """Shared ban evaluation for OAuth login and authenticated API requests."""
 from datetime import datetime, timezone
-
+from zoneinfo import ZoneInfo
 from utils.exceptions import AppException
 
 ACCOUNT_SUSPENDED_CODE = "ACCOUNT_SUSPENDED"
@@ -37,9 +37,11 @@ def raise_if_user_ban_active(user) -> None:
     )
 
     if now < banned_until:
+        until_local = banned_until.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%d-%m-%Y %I:%M %p")
+
         until_iso = banned_until.isoformat()
         msg = (
-            f"Your account has been suspended until {until_iso}."
+            f"Your account has been suspended until {until_local}."
             + reason_sentence
             + " Please contact your administrator."
         )

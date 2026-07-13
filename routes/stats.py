@@ -45,8 +45,9 @@ async def get_user_stats(user_id: str):
     return api_response(200, data, "User stats fetched")
 
 @stats_router.get("/user/{user_id}/posts")
-async def get_user_posts(user_id: str, page: int = Query(default=1, ge=1), page_size: int = Query(default=10, ge=1)):
-    data = await stats_service.get_user_posts(user_id, page, page_size)
+async def get_user_posts(user_id: str, page: int = Query(default=1, ge=1), page_size: int = Query(default=10, ge=1), 
+type : str | None = Query(default = None)):
+    data = await stats_service.get_user_posts(user_id, page, page_size , type)
     return api_response(200, data, "User posts fetched")
 
 @stats_router.get("/leaderboards/appreciations")

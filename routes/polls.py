@@ -12,8 +12,9 @@ when panel-side poll creation is added later, it'll need its own request
 DTO and route here rather than reusing CreatePostRequest as-is, since the
 panel would be creating on behalf of "the org" rather than a single user.
 """
-from fastapi import APIRouter, Depends
-
+from fastapi import APIRouter, Depends, Query
+from db.client import db
+from prisma.enums import PostType 
 from middlewares.auth import require_admin, require_platform
 from services.app import poll_service
 from utils.ApiResponse import api_response
@@ -41,3 +42,38 @@ async def admin_reopen_poll(
 ):
     result = await poll_service.reopen_poll(current_user, post_id)
     return api_response(200, result, "Poll reopened by admin")
+
+@panel_polls_router.get("")
+async def get_all_polls_for_panel(
+    page: int = Query(default=1, ge=1), 
+    page_size: int = Query(default=25, ge=1),
+    current_user = Depends(require_admin),
+):
+    posts = await db.post.find_many(
+        where={
+            "type":PostType.POLL , 
+            "deletedAt":None
+        },
+        include={
+            "author":True,
+            "poll": {
+                "include" : {"options":True}
+            }
+        },
+        order={"createdAt":"desc"},
+        skip=(page -1) * page_size,
+        take=page_size
+    )
+
+    total = await db.post.count(
+        where={"type": PostType.POLL , "deletedAt":None}
+    )
+
+    data ={
+        "posts": [p.model_dump(mode="json") for p in posts],
+        "total": total,
+        "page" : page,
+        "pageSize": page_size
+    }
+
+    return api_response(200, data, "All polls fetched for panenl")
