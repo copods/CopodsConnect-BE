@@ -36,18 +36,24 @@ async def write_audit_log(
 
     metadata: a dict that gets frozen as JSON. Shape is event-type-specific.
     """
-    row = await db.auditlog.create(
-        data={
-            "eventType": event_type,
-            "actorType": actor_type,
-            "actorId": actor_id,
-            "entityType": entity_type,
-            "entityId": entity_id,
-            "parentEntityType": parent_entity_type,
-            "parentEntityId": parent_entity_id,
-            "metadata": Json(metadata) if metadata is not None else None,
-        }
-    )
+    data = {
+        "eventType": event_type,
+        "actorType": actor_type,
+        "entityType": entity_type,
+        "entityId": entity_id,
+    }
+    
+    if actor_id is not None:
+        data["actorId"] = actor_id
+    if parent_entity_type is not None:
+        data["parentEntityType"] = parent_entity_type
+    if parent_entity_id is not None:
+        data["parentEntityId"] = parent_entity_id
+    if metadata is not None:
+        data["metadata"] = Json(metadata)
+
+    row = await db.auditlog.create(data=data)
+
 
     # Fan-out notification rows for relevant event types
     from services import notification_engine

@@ -1,7 +1,8 @@
 # routes/appreciation_types.py
 from typing import List
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, UploadFile, File
+
 
 from middlewares.auth import require_admin
 from models.schemas.appreciation_types import AppreciationTypeOut
@@ -48,7 +49,21 @@ async def upload_svg(type_id: str, file: UploadFile = File(...)):
     result = await appreciation_type_service.upload_svg(type_id, file_bytes, file.filename or "")
     return api_response(200, result, "SVG uploaded successfully")
 
+# BUG FIX: Added the missing Badge Upload route
+@appreciation_types_router.post("/{type_id}/badge")
+async def upload_badge(type_id: str, file: UploadFile = File(...)):
+    file_bytes = await file.read()
+    result = await appreciation_type_service.upload_badge(type_id, file_bytes, file.filename or "")
+    return api_response(200, result, "Badge uploaded successfully")
+
+# BUG FIX: Added the missing Reorder route for the frontend drag-and-drop
+@appreciation_types_router.put("/reorder")
+async def reorder_types(body: AppreciationTypeReorderBody):
+    result = await appreciation_type_service.reorder_types(body)
+    return api_response(200, result, "Appreciation types reordered successfully")
+
 @appreciation_types_router.delete("/{type_id}")
 async def delete_type(type_id: str):
     result = await appreciation_type_service.delete_type(type_id)
     return api_response(200, result, "Appreciation type deleted successfully")
+

@@ -325,9 +325,16 @@ async def get_user_stats(user_id: str):
     }
 
 
-async def get_user_posts(user_id :str , page: int, page_size: int):
+async def get_user_posts(user_id :str , page: int, page_size: int,post_type: str | None=None):
+    #Base query 
+    where_clause = {"authorId": user_id, "deletedAt": None}
+
+    # If a filter is applied , add it to the query 
+    if post_type :
+        where_clause["type"]= post_type
+
     posts = await db.post.find_many(
-        where={"authorId": user_id, "deletedAt":None},
+        where=where_clause,
         include={
             "tags":{
                 "include":{"taggedUser":True}
@@ -345,10 +352,7 @@ async def get_user_posts(user_id :str , page: int, page_size: int):
     )
 
     total = await db.post.count(
-        where={
-            "authorId":user_id,
-            "deletedAt":None
-        }  
+        where=where_clause  
     )
 
     result = []

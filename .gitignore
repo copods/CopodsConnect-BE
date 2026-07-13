@@ -16,3 +16,35 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.mutmut-cache
+.testmondata
+postman/
+
+# Added by code-review-graph
+.code-review-graph/
+.claude 
+.cursor
+.gemini
+.github
+.kiro
+.qoder
+.cursorrules
+.mcp.json
+.opencode.json
+.windsurfrules
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+QODER.md

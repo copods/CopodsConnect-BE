@@ -23,6 +23,10 @@ from models.schemas.app.notifications import (
     MarkAllReadResponse,
 )
 
+# Event types whose UserNotification rows get grouped at read time into
+# a single "X and N others ..." entry, keyed on (eventType, target entity, recipient).
+AGGREGATED_EVENT_TYPES = ("POST_LIKED", "COMMENT_CREATED", "POLL_VOTE_CAST")
+
 
 # ── Serializer ────────────────────────────────────────────────
 
@@ -105,7 +109,7 @@ async def get_notifications(
         event_type = sn["eventType"]
 
         # only aggregate LIKED and COMMENT_CREATED
-        if event_type in ("POST_LIKED", "COMMENT_CREATED"):
+        if event_type in AGGREGATED_EVENT_TYPES:
             # Grouping key : eventType + target entity ID + recipientId
             entity_key= sn.get("parentEntityId") or sn.get("entityId")
             key = (event_type, entity_key, current_user.id)
@@ -120,7 +124,8 @@ async def get_notifications(
                     base_sn["isRead"]=False
                     base_sn["readAt"]=None
                 continue
-                    
+            
+            sn["aggregatedCount"] = 1  # NEW: keep consistent for POLL_VOTE_CAST
             seen[key]=sn
             
         grouped_notifications.append(sn)
@@ -150,7 +155,7 @@ async def mark_notification_read(current_user, notification_id: str) -> dict:
     al = notif.auditLog
 
     # If this is an aggregated event type, mark ALL related unread notifications as read!
-    if al.eventType in ("POST_LIKED", "COMMENT_CREATED"):
+    if al.eventType in AGGREGATED_EVENT_TYPES:
         where_clause = {
             "recipientId": current_user.id,
             "readAt": None,

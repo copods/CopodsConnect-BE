@@ -66,6 +66,12 @@ async def dispatch(audit_log) -> None:
     # ── Appreciations ─────────────────────────────────────────
     elif et == AuditEventType.APPRECIATION_SENT:
         await _on_appreciation_sent(audit_log, meta)
+        # ── Polls ──────────────────────────────────────────────────
+    elif et == AuditEventType.POLL_CREATED:
+        await _on_poll_created(audit_log, meta)
+
+    elif et == AuditEventType.POLL_VOTE_CAST:
+        await _on_poll_vote_cast(audit_log, meta)
 
     # ── System celebrations ───────────────────────────────────
     elif et == AuditEventType.SYSTEM_BIRTHDAY_POST_CREATED:
@@ -188,6 +194,44 @@ async def _on_appreciation_sent(audit_log, meta: dict) -> None:
     # Filter out the sender in case they somehow appear in recipients
     targets = [rid for rid in recipient_ids if rid != sender_id]
     await _fan_out(audit_log.id, targets)
+
+async def _on_poll_created(audit_log, meta: dict) -> None:
+    """
+    POLL_CREATED: broadcast to every active, non-banned, non-deleted
+    user who has logged into the app — excluding the poll creator.
+    Users who've never logged into the app (panel-invited but inactive)
+    are deliberately excluded per product decision.
+    entityId = poll_id, parentEntityId = post_id, actorId = creator's user_id
+    """
+    creator_id = audit_log.actorId
+
+    where: dict = {
+        "deletedAt": None,
+        "isBanned": False,
+        "hasLoggedInApp": True,
+    }
+    if creator_id:
+        where["id"] = {"not": creator_id}
+
+    recipients = await db.user.find_many(where=where)
+    recipient_ids = [u.id for u in recipients]
+    await _fan_out(audit_log.id, recipient_ids)
+
+
+async def _on_poll_vote_cast(audit_log, meta: dict) -> None:
+    """
+    POLL_VOTE_CAST: notify the poll creator. Skipped if voter IS creator.
+    Reuses the same per-event-row fan-out as POST_LIKED/COMMENT_CREATED —
+    aggregation into "X and N others voted" happens at read time in
+    notification_service.get_notifications(), same pattern as likes.
+    entityId = poll_vote_id, parentEntityId = post_id, actorId = voter's user_id
+    """
+    poll_creator_id = meta.get("pollCreatorId")
+    if not poll_creator_id:
+        return
+    if audit_log.actorId == poll_creator_id:
+        return
+    await _fan_out(audit_log.id, [poll_creator_id])
 
 
 async def _on_birthday_post_created(audit_log, meta: dict) -> None:

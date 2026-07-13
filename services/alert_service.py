@@ -79,6 +79,7 @@ async def auto_resolve_alert(
     flagged_phrase: str | None,
     comment_id: str | None = None,
     reason: str = "BLACKLIST_HIT",
+    extra_flag_details: dict | None = None, # NEW: Added this parameter
 ) -> None:
     """
     Creates an AdminAlert pre-resolved as AUTO_REMOVED.
@@ -88,6 +89,10 @@ async def auto_resolve_alert(
     now = datetime.now(timezone.utc)
     flag_details = {"reason": reason, "flaggedPhrase": flagged_phrase}
 
+    # NEW: Merge the extra details (like Poll options) so they are saved!
+    if extra_flag_details:
+        flag_details.update(extra_flag_details)
+    
     alert = await db.adminalert.create(
         data={
             "postId":         post_id,
@@ -269,6 +274,25 @@ async def resolve_alert(alert_id: str, action: AlertAction, resolved_by_id: str)
                         recipient_ids=recipient_ids
                     )
 
+        # NEW — late materialization for restored/whitelisted polls.
+        # Covers both the AI-flagged-then-restored path and the
+        # blacklist-auto-removed-then-restored path.
+        if new_content_status == ContentStatus.PUBLISHED and updated_content.type == PostType.POLL:
+            existing_poll = await db.poll.find_first(where={"postId": alert.postId})
+            if not existing_poll:
+                import json
+                flag_data = json.loads(alert.flagDetails) if alert.flagDetails else {}
+                option_texts = flag_data.get("pollOptionTexts")
+                closes_at_iso = flag_data.get("pollClosesAt")
+
+                if option_texts:
+                    from services.app.post_service import _materialize_poll
+                    await _materialize_poll(
+                        post_id=alert.postId,
+                        creator_id=updated_content.authorId,
+                        option_texts=option_texts,
+                        closes_at=datetime.fromisoformat(closes_at_iso) if closes_at_iso else None,
+                    )
 
     
     await write_audit_log(
@@ -286,8 +310,8 @@ async def resolve_alert(alert_id: str, action: AlertAction, resolved_by_id: str)
             "commentId":       alert.commentId,
             "flaggedPhrase":   alert.flaggedPhrase,
             "flagReason": (
-                updated_content.flagReason.value
-                if updated_content and updated_content.flagReason
+                getattr(updated_content.flagReason, "value", updated_content.flagReason)
+                if updated_content and hasattr(updated_content, "flagReason") and updated_content.flagReason
                 else None
             ),
         },

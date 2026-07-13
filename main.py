@@ -20,6 +20,8 @@ from jobs.daily_celebration_job import create_daily_celebration_posts
 from jobs.leaderboard_digest_job import send_leaderboard_digest
 from constants import APP_NAME, API_PREFIX
 from routes import auth
+from routes.polls import panel_polls_router
+
 from routes import users
 from routes.app import auth as app_auth
 from routes.app.posts import posts_router
@@ -94,6 +96,7 @@ app.add_exception_handler(Exception, generic_exception_handler)
 # --- Routes ---
 app.include_router(auth.auth_router, prefix=API_PREFIX)
 app.include_router(users.users_router, prefix=API_PREFIX)
+app.include_router(panel_polls_router, prefix=API_PREFIX)
 # --- App Routes ---
 app.include_router(app_auth.app_auth_router, prefix=API_PREFIX)
 app.include_router(posts_router, prefix=API_PREFIX)
