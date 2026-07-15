@@ -76,10 +76,20 @@ app = FastAPI(title=APP_NAME, lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory="public/assets"), name="assets")  # ← NEW
 
 
+def _parse_cors_origins(raw: str) -> list[str]:
+    import json
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [o.strip() for o in parsed if o.strip()]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","),
+    allow_origins=_parse_cors_origins(os.getenv("CORS_ORIGINS", "http://localhost:5173")),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
