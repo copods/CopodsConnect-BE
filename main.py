@@ -86,10 +86,16 @@ def _parse_cors_origins(raw: str) -> list[str]:
         pass
     return [o.strip() for o in raw.split(",") if o.strip()]
 
+_CORS_ORIGINS = list({
+    "http://localhost:5173",
+    "https://dev.d1f79thuypnl1s.amplifyapp.com",
+    *_parse_cors_origins(os.getenv("CORS_ORIGINS", "")),
+})
+
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_parse_cors_origins(os.getenv("CORS_ORIGINS", "http://localhost:5173")),
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
