@@ -18,7 +18,7 @@ def get_ses_client():
 
 def _send_email_via_ses(to_email: str, subject: str, body_text: str) -> bool:
     """Core function to send emails using Amazon SES."""
-    sender = os.getenv("MAIL_FROM", "no-reply@copods.co")
+    sender = os.getenv("MAIL_FROM", "dev@copods.co")
     client = get_ses_client()
 
     try:
