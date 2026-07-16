@@ -76,10 +76,26 @@ app = FastAPI(title=APP_NAME, lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory="public/assets"), name="assets")  # ← NEW
 
 
+def _parse_cors_origins(raw: str) -> list[str]:
+    import json
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [o.strip() for o in parsed if o.strip()]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+_CORS_ORIGINS = list({
+    "http://localhost:5173",
+    "https://dev.d1f79thuypnl1s.amplifyapp.com",
+    *_parse_cors_origins(os.getenv("CORS_ORIGINS", "")),
+})
+
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","),
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
