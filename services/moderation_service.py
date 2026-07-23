@@ -364,15 +364,15 @@ async def scan_text(text: str) -> tuple[float, str | None, str | None, float]:
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            error_body = e.response.text
-            print(f"[moderation] Gemini HTTP {e.response.status_code} error: {error_body}")
+            # Catch Google Safety Block (e.g. 400 Bad Request if text is severely inappropriate).
+            # Google's network blocks explicit content before it even reaches the LLM processing.
+            if e.response.status_code == 400:
+                print(f"[moderation] Gemini Safety Block triggered for text")
 
-            # Only treat as safety block if Google EXPLICITLY says so
-            if e.response.status_code == 400 and "safety" in error_body.lower():
-                print(f"[moderation] Confirmed Gemini Safety Block for text")
-                return 1.0, "other", None, 1.0
-
-            # Any other error → raise (post_service will return 503 to the user)
+                return 1.0 , "other", None , 1.0
+            
+            # ADD THIS ONE LINE FOR SEEING WHAT THE ERROR IS:
+            print(f"API Error Response: {e.response.text}")
             raise
         data = resp.json()
 
@@ -458,13 +458,12 @@ async def scan_images(image_urls: list[str]) -> tuple[float, str | None]:
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as e:
-                error_body = e.response.text
-                print(f"[moderation] Gemini HTTP {e.response.status_code} error (image): {error_body}")
+              # Catch Google Safety Block (e.g. 400 Bad Request if image is severely inappropriate)
+                if e.response.status_code == 400:
+                    print(f"[moderation] Gemini Safety Block triggered for image: {url}")
 
-                if e.response.status_code == 400 and "safety" in error_body.lower():
-                    print(f"[moderation] Confirmed Gemini Safety Block for image: {url}")
                     return 1.0, "safety_blocked"
-                raise
+                raise 
             data = resp.json()
             result = json.loads(data["choices"][0]["message"]["content"])
 
