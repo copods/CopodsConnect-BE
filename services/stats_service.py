@@ -23,9 +23,10 @@ async def get_overview_stats():
     ratio_res = await db.query_raw("""
         SELECT 
             (SELECT COUNT(*) FROM comments WHERE "deleted_at" IS NULL AND "status" = 'PUBLISHED') as total_comments,
-            (SELECT COUNT(*) FROM posts WHERE "deleted_at" IS NULL AND "status" = 'PUBLISHED') as total_posts;
+            (SELECT COUNT(*) FROM posts WHERE "deleted_at" IS NULL AND "status" = 'PUBLISHED') as total_posts,
+            (SELECT COUNT(*) FROM likes) as total_likes
     """)
-    ratio = ratio_res[0] if ratio_res else {"total_comments": 0, "total_posts": 0}
+    ratio = ratio_res[0] if ratio_res else {"total_comments": 0, "total_posts": 0, "total_likes": 0}
 
     velocity_res = await db.query_raw("""
         SELECT
@@ -219,24 +220,56 @@ async def get_moderation_leaderboards():
         "topTriggerWords": top_trigger_words
     }
 
-async def get_activity_heatmap():
-    heatmap = await db.query_raw("""
-        SELECT 
-            EXTRACT(DOW FROM act.created_at) as day_of_week,
-            EXTRACT(HOUR FROM act.created_at) as hour_of_day,
-            COUNT(*) as activity_count
-        FROM (
-            SELECT "created_at" FROM posts WHERE "deleted_at" IS NULL
-            UNION ALL
-            SELECT "created_at" FROM comments WHERE "deleted_at" IS NULL
-            UNION ALL
-            SELECT "created_at" FROM likes
-            UNION ALL
-            SELECT "created_at" FROM appreciations WHERE "deleted_at" IS NULL
-        ) act
-        GROUP BY day_of_week, hour_of_day
-        ORDER BY day_of_week, hour_of_day;
+async def get_activity_heatmap(activity_type:str="all"):
+    if activity_type == "active_users":
+        #only app login events
+        source_query= """SELECT "created_at" FROM audit_logs WHERE "event_type" ='USER_LOGIN_APP' """
+    elif activity_type == "content":
+        source_query= """
+        SELECT "created_at" FROM posts WHERE "deleted_at" is NULL 
+        UNION ALL 
+        SELECT "created_at" FROM comments WHERE "deleted_at" is NULL 
+        UNION ALL
+        SELECT "created_at" FROM likes
+        """
+    elif activity_type == "ai_detection":
+        #ai_detection triggered
+        source_query = """
+        SELECT "created_at" FROM "admin_alerts"
+        """
+    elif activity_type == "appreciation":
+        #Appreciations sent
+        source_query="""
+        SELECT "created_at" FROM appreciations WHERE "deleted_at" is NULL
+        """
+    else:
+        #Default : All activity combined(show when no card is selected)
+        source_query="""
+        SELECT "created_at" FROM posts WHERE "deleted_at" is NULL
+        UNION ALL
+        SELECT "created_at" FROM comments WHERE "deleted_at" IS NULL
+        UNION ALL
+        SELECT "created_at" FROM likes
+        UNION ALL
+        SELECT "created_at" FROM appreciations WHERE "deleted_at" IS NULL
+        UNION ALL
+        SELECT "created_at" FROM audit_logs WHERE "event_type" = 'USER_LOGIN_APP'
+        UNION ALL
+        SELECT "created_at" FROM admin_alerts
+        """
+    
+    heatmap= await db.query_raw(f"""
+    SELECT 
+        EXTRACT(DOW FROM act.created_at) as day_of_week,
+        EXTRACT(HOUR FROM act.created_at) as hour_of_day, 
+        COUNT(*) as activity_count
+    FROM (
+        {source_query}
+    ) act
+    GROUP BY day_of_week , hour_of_day
+    ORDER BY day_of_week , hour_of_day;
     """)
+
     return heatmap
 
 async def get_cross_role_connections():
