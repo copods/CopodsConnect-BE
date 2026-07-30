@@ -30,8 +30,8 @@ async def get_moderation_leaderboards():
     return api_response(200, data, "Moderation leaderboards fetched")
 
 @stats_router.get("/activity-heatmap")
-async def get_activity_heatmap():
-    data = await stats_service.get_activity_heatmap()
+async def get_activity_heatmap(type:str = Query(default="all")):
+    data = await stats_service.get_activity_heatmap(type)
     return api_response(200, data, "Activity heatmap fetched")
 
 @stats_router.get("/cross-role")
