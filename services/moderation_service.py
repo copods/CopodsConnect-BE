@@ -1,5 +1,7 @@
 # services/moderation_service.py
 from asyncio import timeout
+import asyncio
+import random
 import os
 import re
 import json
@@ -21,9 +23,46 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # We use the 'Flash' variant instead of 'Pro'. Moderation is a high-volume, 
 # low-latency task. Flash handles this perfectly at a fraction of the cost and time of Pro.
-# (Update this string to gemini-3.5-flash or equivalent depending on your exact access)
+#
+# gemini-2.0-flash is retired (shutdown date June 1, 2026 — see
+# https://ai.google.dev/gemini-api/docs/deprecations). gemini-3.5-flash is the
+# current GA model Google points to as its replacement, released May 19, 2026,
+# no shutdown date announced as of writing. Env-overridable so you can swap
+# models (e.g. during an outage) without a redeploy.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 
-GEMINI_MODEL= "gemini-3.5-flash"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+# Text moderation endpoint
+GEMINI_TEXT_URL  = f"{GEMINI_BASE_URL}/{GEMINI_MODEL}:generateContent"
+
+GEMINI_IMAGE_URL = GEMINI_BASE_URL + f"/{GEMINI_MODEL}:generateContent"
+
+# ── Retry / backoff config for native Gemini calls ─────────────────────────
+# Reference: https://ai.google.dev/gemini-api/docs/troubleshooting#retry-strategy
+#
+# 429 RESOURCE_EXHAUSTED and 503 UNAVAILABLE are transient by Google's own
+# description — the official guidance is to retry with exponential backoff
+# + jitter, not to fail immediately. The official python-genai SDK does
+# exactly this under the hood (up to 4 retries, ~1s initial delay, 60s cap);
+# we're on raw httpx here, so we replicate it explicitly below.
+#
+# 400 / 401 / 403 / 404 are NOT retried — those mean the request body, the
+# key, or the model string is wrong, and retrying changes nothing about that.
+GEMINI_MAX_RETRIES = 4
+GEMINI_INITIAL_BACKOFF_SECONDS = 1.0
+GEMINI_MAX_BACKOFF_SECONDS = 60.0
+_GEMINI_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+
+# Per-request timeout. Deliberately NOT unbounded (the old code used
+# timeout=None, "wait as long as needed"). Behind an ALB, the load balancer
+# has its own idle timeout (60s by default) — an httpx call with no timeout
+# of its own can end up waiting past the point the ALB already killed the
+# connection, which looks like a random, unreproducible failure in ECS and
+# never shows up locally, since there's no proxy in front of it there.
+# Override with GEMINI_REQUEST_TIMEOUT_SECONDS if your ALB idle timeout is
+# raised higher than the default.
+GEMINI_REQUEST_TIMEOUT_SECONDS = float(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "55"))
 
 # ── Sightengine ───────────────────────────────────────────────
 SIGHTENGINE_API_URL = "https://api.sightengine.com/1.0/check.json"
@@ -334,33 +373,183 @@ _MODERATION_JSON_SCHEMA = {
 }
 
 
+def _gemini_backoff_seconds(attempt: int) -> float:
+    """Exponential backoff with full jitter: ~1s, 2s, 4s, 8s... capped at GEMINI_MAX_BACKOFF_SECONDS."""
+    backoff = min(GEMINI_INITIAL_BACKOFF_SECONDS * (2 ** attempt), GEMINI_MAX_BACKOFF_SECONDS)
+    return backoff * (0.5 + random.random())  # jitter so parallel ECS tasks don't retry in lockstep
+
+
+async def _post_gemini_native(
+    client: httpx.AsyncClient,
+    url: str,
+    payload: dict,
+    *,
+    context: str,
+) -> httpx.Response:
+    """
+    POST to a native Gemini `:generateContent` endpoint, with exponential
+    backoff + jitter retries on transient errors:
+
+      - 429 RESOURCE_EXHAUSTED  (rate/spend limit — usually clears within seconds)
+      - 503 UNAVAILABLE         (regional overload — Google's own advice is retry/backoff)
+      - 500 / 502 / 504         (backend hiccups, gateway errors)
+      - raw network errors      (DNS blips, connection resets, read timeouts)
+
+    Non-transient errors are returned immediately without retrying, since
+    retrying can't fix them:
+
+      - 400 bad request / malformed payload
+      - 401 / 403 bad or under-permissioned key
+      - 404 unknown model (wrong string, or a retired one — see
+        https://ai.google.dev/gemini-api/docs/deprecations)
+
+    Returns the httpx.Response either way (success, exhausted retries, or a
+    non-retryable error) so callers keep using their existing
+    resp.raise_for_status() / error-body inspection exactly as before.
+    """
+    attempt = 0
+    while True:
+        try:
+            resp = await client.post(
+                url,
+                headers={
+                    # Native Google auth header — works for both AIza (Standard)
+                    # and AQ. (Auth) keys. Unlike "Authorization: Bearer", it
+                    # never collides with the OpenAI-compatible transport's own
+                    # auth handling, which is what causes AQ. keys to be
+                    # rejected on /v1beta/openai/... with "Multiple
+                    # authentication credentials received".
+                    "x-goog-api-key": GEMINI_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=GEMINI_REQUEST_TIMEOUT_SECONDS,
+            )
+        except httpx.RequestError as e:
+            if attempt >= GEMINI_MAX_RETRIES:
+                raise
+            wait_s = _gemini_backoff_seconds(attempt)
+            print(f"[moderation] Gemini network error ({context}), "
+                  f"retry {attempt + 1}/{GEMINI_MAX_RETRIES} in {wait_s:.1f}s: {e}")
+            await asyncio.sleep(wait_s)
+            attempt += 1
+            continue
+
+        if resp.status_code not in _GEMINI_RETRYABLE_STATUS_CODES:
+            return resp  # 2xx success, or a non-retryable error for the caller to inspect
+
+        if attempt >= GEMINI_MAX_RETRIES:
+            return resp  # retries exhausted — let the caller's raise_for_status() surface it
+
+        wait_s = _gemini_backoff_seconds(attempt)
+        print(f"[moderation] Gemini HTTP {resp.status_code} ({context}), "
+              f"retry {attempt + 1}/{GEMINI_MAX_RETRIES} in {wait_s:.1f}s")
+        await asyncio.sleep(wait_s)
+        attempt += 1
+
+
+# async def scan_text(text: str) -> tuple[float, str | None, str | None, float]:
+#     """
+#     Returns (score, category, flagged_phrase, confidence).
+#     score = 0.0 if not flagged, else = confidence.
+#     Raises on any API error — caller handles (no silent fallback).
+#     """
+#     if not text or not text.strip():
+#         return 0.0, None, None, 0.0
+
+#     async with httpx.AsyncClient(timeout=None) as client:   # no timeout — wait as long as needed
+#         resp = await client.post(
+#             GEMINI_CHAT_URL,
+#             headers={
+#                 "Authorization": f"Bearer {GEMINI_API_KEY}",
+#                 "Content-Type": "application/json",
+#             },
+#             json={
+#                 "model": GEMINI_MODEL,
+#                 "response_format": _MODERATION_JSON_SCHEMA,
+#                 "messages": [
+#                     {"role": "system", 
+#                     "content": _MODERATION_SYSTEM_PROMPT},
+#                     {"role": "user",   
+#                     "content": f"<user_input>{text}</user_input>"},
+#                 ],
+#             },
+#         )
+#         try:
+#             resp.raise_for_status()
+#         except httpx.HTTPStatusError as e:
+#             error_body = e.response.text
+#             print(f"[moderation] Gemini HTTP {e.response.status_code} error: {error_body}")
+
+#             # Only treat as safety block if Google EXPLICITLY says so
+#             if e.response.status_code == 400 and "safety" in error_body.lower():
+#                 print(f"[moderation] Confirmed Gemini Safety Block for text")
+#                 return 1.0, "other", None, 1.0
+
+#             # Any other error → raise (post_service will return 503 to the user)
+#             raise
+#         data = resp.json()
+
+#     result = json.loads(data["choices"][0]["message"]["content"])
+
+#     if not result["is_flagged"]:
+#         return 0.0, None, None, result.get("confidence", 0.0)
+
+#     confidence = result.get("confidence", 0.0)
+#     return confidence, result.get("category"), result.get("flagged_phrase"), confidence
+
 async def scan_text(text: str) -> tuple[float, str | None, str | None, float]:
     """
     Returns (score, category, flagged_phrase, confidence).
     score = 0.0 if not flagged, else = confidence.
     Raises on any API error — caller handles (no silent fallback).
+
+    NOTE: Using Native Google Generative Language API (not OpenAI-compatible endpoint).
+    Request structure: contents > parts > text
+    Response structure: candidates > content > parts > text
     """
     if not text or not text.strip():
         return 0.0, None, None, 0.0
 
-    async with httpx.AsyncClient(timeout=None) as client:   # no timeout — wait as long as needed
-        resp = await client.post(
-            GEMINI_CHAT_URL,
-            headers={
-                "Authorization": f"Bearer {GEMINI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": GEMINI_MODEL,
-                "response_format": _MODERATION_JSON_SCHEMA,
-                "messages": [
-                    {"role": "system", 
-                    "content": _MODERATION_SYSTEM_PROMPT},
-                    {"role": "user",   
-                    "content": f"<user_input>{text}</user_input>"},
-                ],
-            },
-        )
+    # ── Native Google request payload ─────────────────────────────────────────
+    payload = {
+        # systemInstruction is a top-level field in native Google API
+        # (in OpenAI format this was {"role": "system", "content": ...} inside messages[])
+        "systemInstruction": {
+            "parts": [{"text": _MODERATION_SYSTEM_PROMPT}]
+        },
+        # contents[] replaces messages[] from the OpenAI format
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": f"<user_input>{text}</user_input>"}]
+            }
+        ],
+        # generationConfig replaces response_format from the OpenAI format
+        # responseMimeType forces JSON output
+        # responseSchema enforces the exact same schema we had before
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "is_flagged":     {"type": "BOOLEAN"},
+                    "flagged_phrase": {"type": "STRING",  "nullable": True},
+                    "category": {
+                        "type": "STRING",
+                        "nullable": True,
+                        "enum": ["violence", "sexual", "hate", "harassment", "profanity", "other"]
+                    },
+                    "confidence": {"type": "NUMBER"},
+                },
+                "required": ["is_flagged", "flagged_phrase", "category", "confidence"],
+            }
+        }
+    }
+    # ──────────────────────────────────────────────────────────────────────────
+
+    async with httpx.AsyncClient(timeout=GEMINI_REQUEST_TIMEOUT_SECONDS) as client:
+        resp = await _post_gemini_native(client, GEMINI_TEXT_URL, payload, context="scan_text")
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -372,17 +561,26 @@ async def scan_text(text: str) -> tuple[float, str | None, str | None, float]:
                 print(f"[moderation] Confirmed Gemini Safety Block for text")
                 return 1.0, "other", None, 1.0
 
+            if e.response.status_code == 404:
+                print(f"[moderation] Model '{GEMINI_MODEL}' returned 404 — verify it against "
+                      f"https://ai.google.dev/gemini-api/docs/models (current models) or "
+                      f"https://ai.google.dev/gemini-api/docs/deprecations (retired models).")
+
             # Any other error → raise (post_service will return 503 to the user)
             raise
         data = resp.json()
 
-    result = json.loads(data["choices"][0]["message"]["content"])
+    # Native Google response: candidates[0].content.parts[0].text
+    # (OpenAI-compatible was: choices[0].message.content)
+    raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+    result = json.loads(raw_text)
 
     if not result["is_flagged"]:
         return 0.0, None, None, result.get("confidence", 0.0)
 
     confidence = result.get("confidence", 0.0)
     return confidence, result.get("category"), result.get("flagged_phrase"), confidence
+
 
 _IMAGE_MODERATION_JSON_SCHEMA = {
     "type":"json_schema",
@@ -417,7 +615,7 @@ async def scan_images(image_urls: list[str]) -> tuple[float, str | None]:
     highest_score = 0.0
     highest_reason = None
 
-    async with httpx.AsyncClient(timeout=None) as client : # no timeout 
+    async with httpx.AsyncClient(timeout=GEMINI_REQUEST_TIMEOUT_SECONDS) as client:
         for url in image_urls:
             #1 download image bytes 
             img_resp = await client.get(url)
@@ -426,34 +624,70 @@ async def scan_images(image_urls: list[str]) -> tuple[float, str | None]:
             mime_type = img_resp.headers.get("Content-Type", "image/jpeg")
 
             #2 send to gemini multimodal
-            resp = await client.post(
-                GEMINI_CHAT_URL,
-                headers={
-                    "Authorization": f"Bearer {GEMINI_API_KEY}",
-                    "Content-Type": "application/json",
+            # resp = await client.post(
+            #     GEMINI_CHAT_URL,
+            #     headers={
+            #         "Authorization": f"Bearer {GEMINI_API_KEY}",
+            #         "Content-Type": "application/json",
+            #     },
+            #     json={
+            #         "model":GEMINI_MODEL,
+            #         "response_format":_IMAGE_MODERATION_JSON_SCHEMA,
+            #         "messages":[
+            #             {
+            #                 "role":"system",
+            #                 "content": "You are an image moderator for a professional workplace. Analyze this image for nudity , sexual content, graphic violence , or highly offensive material. Return a score from 0.0(safe) to 1.0(highly inappropriate) and the primary reason if flagged."
+            #             },
+            #             {
+            #                 "role":"user",
+            #                 "content":[
+            #                     {
+            #                         "type":"image_url",
+            #                         "image_url": {
+            #                             "url":f"data:{mime_type};base64,{img_base64}"
+            #                         }
+            #                     }
+            #                 ]
+            #             }
+            #         ]
+            #     }
+            # )
+
+                        #2 send to gemini multimodal — Native Google Route
+            # (Previously used OpenAI messages[] with image_url type)
+            # Native Google uses contents > parts with inlineData for base64 images
+            image_payload = {
+                "systemInstruction": {
+                    "parts": [{"text": "You are an image moderator for a professional workplace. Analyze this image for nudity, sexual content, graphic violence, or highly offensive material. Return a score from 0.0 (safe) to 1.0 (highly inappropriate) and the primary reason if flagged."}]
                 },
-                json={
-                    "model":GEMINI_MODEL,
-                    "response_format":_IMAGE_MODERATION_JSON_SCHEMA,
-                    "messages":[
-                        {
-                            "role":"system",
-                            "content": "You are an image moderator for a professional workplace. Analyze this image for nudity , sexual content, graphic violence , or highly offensive material. Return a score from 0.0(safe) to 1.0(highly inappropriate) and the primary reason if flagged."
-                        },
-                        {
-                            "role":"user",
-                            "content":[
-                                {
-                                    "type":"image_url",
-                                    "image_url": {
-                                        "url":f"data:{mime_type};base64,{img_base64}"
-                                    }
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                # inlineData replaces image_url from the OpenAI format
+                                "inlineData": {
+                                    "mimeType": mime_type,
+                                    "data": img_base64
                                 }
-                            ]
-                        }
-                    ]
+                            }
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseSchema": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "score":  {"type": "NUMBER"},
+                            "reason": {"type": "STRING", "nullable": True},
+                        },
+                        "required": ["score", "reason"],
+                    }
                 }
-            )
+            }
+
+            resp = await _post_gemini_native(client, GEMINI_IMAGE_URL, image_payload, context=f"scan_images:{url}")
 
             try:
                 resp.raise_for_status()
@@ -464,9 +698,20 @@ async def scan_images(image_urls: list[str]) -> tuple[float, str | None]:
                 if e.response.status_code == 400 and "safety" in error_body.lower():
                     print(f"[moderation] Confirmed Gemini Safety Block for image: {url}")
                     return 1.0, "safety_blocked"
+
+                if e.response.status_code == 404:
+                    print(f"[moderation] Model '{GEMINI_MODEL}' returned 404 — verify it against "
+                          f"https://ai.google.dev/gemini-api/docs/models (current models) or "
+                          f"https://ai.google.dev/gemini-api/docs/deprecations (retired models).")
+
                 raise
             data = resp.json()
-            result = json.loads(data["choices"][0]["message"]["content"])
+            # result = json.loads(data["choices"][0]["message"]["content"])
+            
+            # Native Google response parsing
+            # (OpenAI was: data["choices"][0]["message"]["content"])
+            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            result = json.loads(raw_text)
 
             score = result.get("score", 0.0)
             reason = result.get("reason")
