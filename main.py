@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
     await db.disconnect()
 
 
-app = FastAPI(title=APP_NAME, lifespan=lifespan)
+app = FastAPI(title=APP_NAME, lifespan=lifespan, docs_url=None, redoc_url=None)
 
 
 # --- Static files ---
