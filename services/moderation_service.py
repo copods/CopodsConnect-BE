@@ -407,6 +407,16 @@ async def _post_gemini_native(
     non-retryable error) so callers keep using their existing
     resp.raise_for_status() / error-body inspection exactly as before.
     """
+
+    print("\n--- [MODERATION LOG] ---")
+    print(f"Context: {context}")
+    print(f"URL: {url}")
+    print(f"Payload sent to Gemini: {json.dumps(payload, indent=2)}")
+    print(f"GEMINI_API_KEY is None? : {GEMINI_API_KEY is None}")
+    if GEMINI_API_KEY:
+        print(f"GEMINI_API_KEY starts with: {GEMINI_API_KEY[:5]}...")
+    print("------------------------\n")
+
     attempt = 0
     while True:
         try:
