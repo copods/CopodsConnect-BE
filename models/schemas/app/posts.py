@@ -160,6 +160,16 @@ class PollOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+class PostLinkMetadata(BaseModel):
+    """
+    Metadata for a single URL found in a post caption, fetched on-the-fly.
+
+    Future scope (TODO): once we have a PostLink DB table that stores this at
+    post-creation time, this will be populated from a DB join (like media/tags)
+    instead of a live HTTP fetch, making reads free.
+    """
+    url: str
+    title: Optional[str] = None  # None if fetch failed — frontend falls back to raw URL
 
 
 class PostOut(BaseModel):
@@ -181,6 +191,7 @@ class PostOut(BaseModel):
     appreciation: Optional[AppreciationOut] = None # NEW
     poll: Optional[PollOut] = None
     reactionType:Optional[str] = None
+    linkMetadata: list[PostLinkMetadata] = []
 
     model_config = ConfigDict(from_attributes=True)
 

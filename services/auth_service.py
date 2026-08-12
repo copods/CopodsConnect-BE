@@ -146,13 +146,13 @@ async def _get_and_update_user(user_info: dict, platform: str):
         user = await db.user.update(
             where={"email": email},
             data={
-                # Only fill name/picture from Google if the user has not set their own yet
+                # Only fill name/picture from Google if the DB is empty (None or "") AND Google provided one
                 **({
                     "name": name,
-                } if existing_user.name is None else {}),
+                } if not existing_user.name and name else {}),
                 **({
                     "picture": picture,
-                } if existing_user.picture is None else {}),
+                } if not existing_user.picture and picture else {}),
                 "googleSub": google_sub,
                 login_flag: True
             }

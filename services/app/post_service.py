@@ -35,6 +35,7 @@ from services.moderation_service import (
 )
 from services.alert_service import create_alert, auto_resolve_alert
 from constants import MODERATION_REVIEW_THRESHOLD
+from utils.link_preview import fetch_link_metadata
 
 
 POST_INCLUDE = {
@@ -209,12 +210,13 @@ def _build_poll_flag_details(body)->dict:
         "pollClosesAt": body.pollClosesAt.isoformat() if body.pollClosesAt else None,
     }
 
-def _serialize_post(
+async def _serialize_post(
     post,
     current_user_id: str,
     include_comments: bool = False,
     comment_count: int | None = None,
     user_vote_option_id: str | None = None, # NEW: Added for Polls
+    link_metadata: list[dict] | None = None,  # Pre-fetched by caller; None triggers self-fetch (single-post path)
 ) -> dict:
     likes = getattr(post, "likes", []) or []
     comments_rel = getattr(post, "comments", []) or []
@@ -228,6 +230,18 @@ def _serialize_post(
         )
         if comment_count is None:
             comment_count = 0
+    
+    # Fetch link metadata if not pre-supplied by the caller. 
+    # The feed path (get_feed) pre-fetches for all posts concurrently and passes 
+    # it in via the link_metadata param to avoid serial waits per post. 
+    # The single-post path (get_post , create_post return) passes it in as well
+    # after fetching alongside image moderation. This self-fetch is a safe 
+    # fallback for any caller that doesnt pre-fetch. 
+    # 
+    # Future scope (TODO): once link metadata is stored in the PostLink DB table, remove this fetch entirely - read from post.links join like post.media
+
+    if link_metadata is None:
+        link_metadata = await fetch_link_metadata(post.caption or "")
 
     payload = {
         "id": post.id,
@@ -270,6 +284,7 @@ def _serialize_post(
             else None
         ),
         # ------------------------------
+        "linkMetadata": link_metadata,
     }
     if include_comments:
         payload["comments"] = [_serialize_comment(c) for c in comments_rel]
@@ -351,12 +366,41 @@ async def create_post(current_user, body) -> dict:
 
     now = datetime.now(timezone.utc)
 
-    # Polls feed caption + option text through moderation as one combined string.
+    # ── Step 0 — Fetch link titles concurrently with image scan ───────────────
+    # We fetch link titles BEFORE running text moderation so that the titles
+    # can be appended to moderation_text and sent to Gemini. This closes the
+    # loophole where a user could paste a link whose page title contains NSFW
+    # content that would otherwise bypass text moderation entirely.
+    #
+    # fetch_link_metadata fires all URL fetches concurrently internally, so
+    # 1 link or 5 links takes the same time (= slowest single response, ~1s).
+    # We run it alongside scan_images (which is independent) to save time.
+    #
+    # Future scope (TODO): at post creation time, persist the fetched metadata
+    # to a PostLink DB table so that get_feed / get_post can do a DB join
+    # instead of a live HTTP fetch on every read.
+    image_urls = [m.url for m in body.media] if body.media else []
+
+    link_metadata, (image_score, image_reason) = await asyncio.gather(
+        fetch_link_metadata(body.caption or ""),
+        scan_images(image_urls) if image_urls else _noop_image_scan(),
+    )
+
+    # ── Step A — Build full moderation text (caption + link titles + poll options)
     moderation_text = body.caption or ""
     if body.type == PostType.POLL and body.pollOptions:
         moderation_text = (moderation_text + " " + " | ".join(body.pollOptions)).strip()
 
-    # ── Step A0/A/B — Static + custom blacklist (no AI call) ──
+    # Append fetched link titles so Gemini moderates them too.
+    # Format: "caption text | [link] Title 1 | [link] Title 2"
+    if link_metadata:
+        titles_combined = " | ".join(
+            f"[link] {m['title']}" for m in link_metadata if m.get("title")
+        )
+        if titles_combined:
+            moderation_text = (moderation_text + " " + titles_combined).strip()
+
+    # ── Step B — Static + custom blacklist (no AI call) ───────────────────────
     if moderation_text:
         blacklist_hit = await check_blacklist(moderation_text)
         if blacklist_hit:
@@ -371,17 +415,15 @@ async def create_post(current_user, body) -> dict:
                 extra_flag_details=_build_poll_flag_details(body) if body.type == PostType.POLL else None,
             )
             post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
-            return _serialize_post(post, current_user.id, include_comments=False)
+            return await _serialize_post(post, current_user.id, include_comments=False, link_metadata=link_metadata)
 
-    # ── Step C — AI scan (no timeout — wait as long as needed) ─
-    image_urls = [m.url for m in body.media] if body.media else []
 
+    # ── Step C — AI scan ──────────────────────────────────────────────────────
     try:
-        (text_score, text_category, text_phrase, text_confidence), \
-        (image_score, image_reason) = await asyncio.gather(
+        (text_score, text_category, text_phrase, text_confidence), = await asyncio.gather(
             scan_text(moderation_text) if moderation_text else _noop_text_scan(),
-            scan_images(image_urls) if image_urls else _noop_image_scan(),
         )
+
     except Exception as e:
         print(f"[moderation] AI scan failed for post {post.id}: {e}")
         await db.post.delete(where={"id": post.id})
@@ -416,7 +458,7 @@ async def create_post(current_user, body) -> dict:
             await _write_published_audit(post, current_user.id, text_score, image_score)
 
             post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
-            return _serialize_post(post, current_user.id, include_comments=False)
+            return await _serialize_post(post, current_user.id, include_comments=False,link_metadata=link_metadata)
 
         note = (
             f"Whitelisted term ('{text_phrase}') — AI flagged anyway "
@@ -462,7 +504,7 @@ async def create_post(current_user, body) -> dict:
             },
         )
         post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
-        return _serialize_post(post, current_user.id, include_comments=False)
+        return await _serialize_post(post, current_user.id, include_comments=False, link_metadata=link_metadata)
 
     # ── Image flagged ──────────────────────────────────────────
     if image_score >= MODERATION_REVIEW_THRESHOLD:
@@ -501,7 +543,7 @@ async def create_post(current_user, body) -> dict:
             },
         )
         post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
-        return _serialize_post(post, current_user.id, include_comments=False)
+        return await _serialize_post(post, current_user.id, include_comments=False,link_metadata=link_metadata)
 
     # ── All clean — publish ────────────────────────────────────
     post = await db.post.update(
@@ -528,7 +570,7 @@ async def create_post(current_user, body) -> dict:
     await _write_published_audit(post, current_user.id, text_score, image_score)
 
     post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
-    return _serialize_post(post, current_user.id, include_comments=False)
+    return await _serialize_post(post, current_user.id, include_comments=False,link_metadata=link_metadata)
 
 
 
@@ -684,8 +726,19 @@ async def get_feed(
     poll_votes_map = await _user_poll_votes(poll_ids, current_user.id)
     # -------------------------------------------
 
-    return FeedResponse(
-        posts=[
+        # Pre-fetch link metadata for all posts concurrently.
+    # asyncio.gather fires all caption fetches at the same time, so the
+    # total wait = slowest single URL across ALL posts (not the sum).
+    # Posts with no links in their caption resolve instantly.
+    #
+    # Future scope (TODO): once PostLink DB table exists, replace this entire
+    # gather with a batch DB lookup — no live HTTP calls on feed load at all.
+    all_link_metadata = await asyncio.gather(
+        *[fetch_link_metadata(p.caption or "") for p in posts]
+    )
+
+    serialized_posts = await asyncio.gather(
+        *[
             _serialize_post(
                 p,
                 current_user.id,
@@ -695,12 +748,18 @@ async def get_feed(
                     if getattr(p, "type", None) == PostType.POLL and getattr(p, "poll", None)
                     else None
                 ),
+                link_metadata=lm,
             )
-            for p in posts
-        ],
+            for p, lm in zip(posts, all_link_metadata)
+        ]
+    )
+
+    return FeedResponse(
+        posts=list(serialized_posts),
         nextCursor=next_cursor,
         hasMore=has_more,
     ).model_dump(mode="json")
+
 
 
 async def get_post(current_user, post_id: str) -> dict:
@@ -719,7 +778,7 @@ async def get_post(current_user, post_id: str) -> dict:
         user_vote_option_id = await _single_user_poll_vote(post.poll.id, current_user.id)
     # ---------------------------------
     
-    return _serialize_post(
+    return await _serialize_post(
         post, current_user.id, include_comments=True, user_vote_option_id=user_vote_option_id
     )
 
@@ -749,7 +808,7 @@ async def update_post(current_user, post_id: str, body) -> dict:
         },
         include=POST_INCLUDE,
     )
-    return _serialize_post(updated, current_user.id, include_comments=True)
+    return await _serialize_post(updated, current_user.id, include_comments=True)
 
 
 async def _update_poll_post(current_user, post, body) -> dict:
@@ -818,7 +877,7 @@ async def _update_poll_post(current_user, post, body) -> dict:
 
     updated = await db.post.find_unique(where={"id": post.id}, include=POST_INCLUDE)
     user_vote_option_id = await _single_user_poll_vote(poll.id, current_user.id)
-    return _serialize_post(
+    return await _serialize_post(
         updated, current_user.id, include_comments=True, user_vote_option_id=user_vote_option_id
     )
 
