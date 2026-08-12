@@ -70,6 +70,7 @@ async def create_alert(
             flagged_user_name=flagged_user.name or "Unknown",
             flagged_user_email=flagged_user.email,
             post_id=post_id,
+            alert_id=alert.id,
         )
 
 
@@ -137,6 +138,7 @@ async def auto_resolve_alert(
             flagged_user_name=flagged_user.name or "Unknown",
             flagged_user_email=flagged_user.email,
             post_id=post_id,
+            alert_id=alert.id,
         )
 
 

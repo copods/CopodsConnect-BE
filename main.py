@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles  # ← NEW
 from prisma.errors import PrismaError
+from fastapi import Request
+import logging
 
 from db.client import db
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -71,6 +73,36 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=APP_NAME, lifespan=lifespan, docs_url=None, redoc_url=None)
 
+# We use the existing uvicorn logger so it prints perfectly to AWS CloudWatch
+logger = logging.getLogger("uvicorn.error")
+@app.middleware("http")
+async def log_incoming_requests(request: Request, call_next):
+    # 1. Capture the Host Header (handles ALB proxy forwarding)
+    host_header = request.headers.get("x-forwarded-host") or request.headers.get("host", "Unknown Host")
+    
+    # 2. Capture the Hacker's Real IP (ALB passes it in x-forwarded-for)
+    real_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "Unknown IP")
+    
+    # 3. Capture User-Agent
+    user_agent = request.headers.get("user-agent", "Unknown Agent")
+    
+    # 4. Capture the exact URL path requested
+    request_url = str(request.url)
+    
+    # Print a highly visible block in CloudWatch
+    logger.info("\n=== [NETWORK LOG] NEW REQUEST ===")
+    logger.info(f"Method & URL: {request.method} {request_url}")
+    logger.info(f"Host Header : {host_header}")
+    logger.info(f"Client IP   : {real_ip}")
+    logger.info(f"User-Agent  : {user_agent}")
+    
+    # This single line is perfect for CloudWatch Insights searching:
+    logger.info(f"SEARCH_STRING: METHOD={request.method} | IP={real_ip} | HOST={host_header} | URL={request_url}")
+    logger.info("=================================\n")
+    
+    # Continue processing the request normally
+    response = await call_next(request)
+    return response
 
 # --- Static files ---
 app.mount("/assets", StaticFiles(directory="public/assets"), name="assets")  # ← NEW
@@ -107,6 +139,7 @@ app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(PrismaError, prisma_exception_handler)
 app.add_exception_handler(Exception, generic_exception_handler)
+
 
 
 # --- Routes ---

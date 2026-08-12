@@ -26,3 +26,4 @@ openai>=1.67.0
 pyahocorasick>=2.0.0
 better-profanity==0.7.0
 boto3>=1.36.23
+beautifulsoup4>=4.12.0
