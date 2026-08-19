@@ -37,6 +37,8 @@ class UpdatePostRequest(BaseModel):
     pollOptions:Optional[list[str]] = None # NEW — only for editing a poll's option text;
                                                    # must match the existing option count exactly,
                                                    # adding/removing options is not supported
+    taggedUserIds: Optional[list[str]] = None  # NEW — full replacement list;
+                                               # None = no change, [] = remove all tags
 
 
 class CreateCommentRequest(BaseModel):

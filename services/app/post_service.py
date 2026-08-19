@@ -786,7 +786,10 @@ async def get_post(current_user, post_id: str) -> dict:
 async def update_post(current_user, post_id: str, body) -> dict:
     post = await db.post.find_unique(
         where={"id": post_id},
-        include={"poll": {"include": {"options": {"order_by": {"order": "asc"}}}}},
+        include={
+            "poll": {"include": {"options": {"order_by": {"order": "asc"}}}},
+            "tags": True
+        },
     )
     if not post or post.deletedAt is not None:
         raise AppException(404, "Post not found")
@@ -795,20 +798,106 @@ async def update_post(current_user, post_id: str, body) -> dict:
     if post.authorId != current_user.id:
         raise AppException(403, "You can only edit your own posts")
 
-    # --- NEW: Delegate to poll update logic ---
     if post.type == PostType.POLL:
         return await _update_poll_post(current_user, post, body)
     # ------------------------------------------
 
-    updated = await db.post.update(
-        where={"id": post_id},
-        data={
-            "caption": body.caption,
-            "captionEditedAt": datetime.now(timezone.utc),
-        },
-        include=POST_INCLUDE,
-    )
+    update_data: dict = {}
+    if body.caption is not None:
+        update_data["caption"] = body.caption
+        update_data["captionEditedAt"] = datetime.now(timezone.utc)
+
+    if update_data:
+        updated = await db.post.update(
+            where={"id": post_id},
+            data=update_data,
+            include=POST_INCLUDE,
+        )
+    else:
+        updated = await db.post.find_unique(where={"id": post_id}, include=POST_INCLUDE)
+
+    # ── Tagged users: diff-based add / remove ─────────────────────────
+    if body.taggedUserIds is not None:
+        await _update_post_tags(current_user, post_id, body.taggedUserIds, post.type)
+        # Re-fetch so the serialized response reflects the updated tag list
+        updated = await db.post.find_unique(where={"id": post_id}, include=POST_INCLUDE)
+    # ------------------------------------------------------------------
+
     return await _serialize_post(updated, current_user.id, include_comments=True)
+
+
+async def _update_post_tags(current_user, post_id: str, incoming_user_ids: list[str], post_type) -> None:
+    """
+    Diff-based tagged-user update for a post (USER_POST or APPRECIATION).
+
+    - incoming_user_ids = full replacement list; [] clears all tags.
+    - POLL posts: rejected — tagging is not supported on polls.
+    - APPRECIATION posts: any ID already in the appreciation's recipient list
+      is silently dropped (recipients != tags, no duplication).
+    - Validates every incoming ID is a real, active user.
+    - Fires USER_TAGGED_IN_POST / USER_UNTAGGED_FROM_POST audit events.
+    """
+    if post_type == PostType.POLL:
+        raise AppException(400, "Polls do not support tagging users")
+
+    # ── Deduplicate against appreciation recipients ────────────────────
+    if post_type == PostType.APPRECIATION:
+        appreciation = await db.appreciation.find_first(
+            where={"postId": post_id, "deletedAt": None},
+            include={"recipients": True},
+        )
+        if appreciation and appreciation.recipients:
+            recipient_user_ids = {r.userId for r in appreciation.recipients}
+            incoming_user_ids = [uid for uid in incoming_user_ids if uid not in recipient_user_ids]
+
+    # ── Deduplicate the incoming list itself (preserve order) ─────────
+    incoming_user_ids = list(dict.fromkeys(incoming_user_ids))
+
+    # ── Validate that all incoming IDs are real, active users ─────────
+    if incoming_user_ids:
+        found_users = await db.user.find_many(
+            where={"id": {"in": incoming_user_ids}, "deletedAt": None}
+        )
+        if len(found_users) != len(incoming_user_ids):
+            raise AppException(400, "One or more tagged users not found")
+
+    # ── Diff against current DB state ─────────────────────────────────
+    existing_tags = await db.posttag.find_many(where={"postId": post_id})
+    existing_user_ids = {t.taggedUserId for t in existing_tags}
+    incoming_set = set(incoming_user_ids)
+
+    ids_to_add = [uid for uid in incoming_user_ids if uid not in existing_user_ids]
+    ids_to_remove = list(existing_user_ids - incoming_set)
+
+    # ── Apply DB changes ───────────────────────────────────────────────
+    if ids_to_remove:
+        await db.posttag.delete_many(
+            where={"postId": post_id, "taggedUserId": {"in": ids_to_remove}}
+        )
+
+    for uid in ids_to_add:
+        await db.posttag.create(data={"postId": post_id, "taggedUserId": uid})
+
+    # ── Audit log ─────────────────────────────────────────────────────
+    for uid in ids_to_add:
+        await write_audit_log(
+            event_type=AuditEventType.USER_TAGGED_IN_POST,
+            actor_type=AuditActorType.USER,
+            actor_id=current_user.id,
+            entity_type=AuditEntityType.POST,
+            entity_id=post_id,
+            metadata={"taggedUserId": uid},
+        )
+
+    for uid in ids_to_remove:
+        await write_audit_log(
+            event_type=AuditEventType.USER_UNTAGGED_FROM_POST,
+            actor_type=AuditActorType.USER,
+            actor_id=current_user.id,
+            entity_type=AuditEntityType.POST,
+            entity_id=post_id,
+            metadata={"taggedUserId": uid},
+        )
 
 
 async def _update_poll_post(current_user, post, body) -> dict:
