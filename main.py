@@ -20,6 +20,7 @@ from jobs.unban_job import clear_expired_bans
 from jobs.purge_soft_deleted_job import purge_soft_deleted_users
 from jobs.daily_celebration_job import create_daily_celebration_posts
 from jobs.leaderboard_digest_job import send_leaderboard_digest
+from services.app.post_service import recover_stuck_pending_posts
 from constants import APP_NAME, API_PREFIX
 from routes import auth
 from routes.polls import panel_polls_router
@@ -45,11 +46,40 @@ from routes.app.notifications import notifications_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.connect()
+
+    cron_logger = logging.getLogger("uvicorn.error")
+
+    def make_logged_job(fn, job_id: str):
+        """Wraps a cron job function to log start, finish, and errors."""
+        async def wrapper(*args, **kwargs):
+            cron_logger.info(f"[cron] {job_id} — starting")
+            try:
+                await fn(*args, **kwargs)
+                cron_logger.info(f"[cron] {job_id} — completed successfully")
+            except Exception as exc:
+                cron_logger.error(f"[cron] {job_id} — FAILED: {exc}")
+                raise
+        return wrapper
+
+    # ── Pending-post recovery: needs a real BackgroundTasks to re-queue work.
+    # We use a lightweight shim that runs tasks inline (fire-and-forget is fine here).
+    async def _recover_pending_cron():
+        from fastapi import BackgroundTasks
+        bt = BackgroundTasks()
+        await recover_stuck_pending_posts(bt)
+        await bt()
+
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(clear_expired_bans, "interval", minutes=15, id="clear_expired_bans")
-    scheduler.add_job(purge_soft_deleted_users, "interval", days=1, id="purge_soft_deleted_users")
     scheduler.add_job(
-        create_daily_celebration_posts,
+        make_logged_job(clear_expired_bans, "clear_expired_bans"),
+        "interval", minutes=15, id="clear_expired_bans",
+    )
+    scheduler.add_job(
+        make_logged_job(purge_soft_deleted_users, "purge_soft_deleted_users"),
+        "interval", days=1, id="purge_soft_deleted_users",
+    )
+    scheduler.add_job(
+        make_logged_job(create_daily_celebration_posts, "daily_celebrations"),
         "cron",
         hour=0,
         minute=0,
@@ -57,13 +87,17 @@ async def lifespan(app: FastAPI):
         id="daily_celebrations",
     )
     scheduler.add_job(
-        send_leaderboard_digest,
+        make_logged_job(send_leaderboard_digest, "leaderboard_digest"),
         "cron",
         day_of_week="mon",
         hour=9,
         minute=0,
         timezone=ZoneInfo("Asia/Kolkata"),
         id="leaderboard_digest",
+    )
+    scheduler.add_job(
+        make_logged_job(_recover_pending_cron, "recover_pending_posts"),
+        "interval", minutes=5, id="recover_pending_posts",
     )
     scheduler.start()
     yield

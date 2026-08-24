@@ -204,8 +204,8 @@ def _send_email_via_ses(
             Source=sender,
         )
         return True
-    except ClientError as e:
-        print(f"Failed to send email via SES: {e.response['Error']['Message']}")
+    except Exception as e:
+        print(f"Failed to send email via SES: {e}")
         return False
 
 

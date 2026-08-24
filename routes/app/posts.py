@@ -1,6 +1,6 @@
 #routes/app/posts.py
 from db.client import db
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from typing import Optional
 from db.client import db
 from prisma.enums import Role, ContentStatus, FlagReason
@@ -40,9 +40,10 @@ posts_router = APIRouter(
 @posts_router.post("")
 async def create_post(
     body: CreatePostRequest,
+    background_tasks: BackgroundTasks,
     current_user=Depends(get_current_user),
 ):
-    result = await post_service.create_post(current_user, body)
+    result = await post_service.create_post(current_user, body,background_tasks)
     return api_response(201, result, "Post created successfully")
 
 
@@ -224,3 +225,16 @@ async def remove_vote(
 ):
     result = await poll_service.remove_vote(current_user, post_id)
     return api_response(200, result, "Vote removed")
+
+@posts_router.post("/internal/recover-pending",include_in_schema=False)
+async def recover_pending_posts(
+    backgroundTasks: BackgroundTasks,
+    current_user = Depends(get_current_user),
+): 
+    """
+    Internal endpoint — re-queues any posts stuck in PENDING_SCAN for > 2 minutes.
+    Call this from a cron job every 5 minutes.
+    """
+    await post_service.recover_stuck_pending_posts(backgroundTasks)
+    return api_response(200, {},"Recovery job queued")
+

@@ -15,6 +15,8 @@ class CreatePostRequest(BaseModel):
     recipientIds: list[str] = [] 
     pollOptions: list[str]=[]         # NEW — required for type=POLL, 2-5 entries
     pollClosesAt: Optional[datetime] = None  # NEW — optional deadline, must be in the future
+    isDefaultMessage: bool = False
+
 
 
 class MediaItem(BaseModel):
