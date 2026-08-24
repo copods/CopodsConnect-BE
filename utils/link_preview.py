@@ -83,7 +83,7 @@ async def _fetch_title(client: httpx.AsyncClient, url:str)-> Optional[str]:
                 "Accept": "text/html, application/xhtml+xml;q=0.9,*/*;q=0.8",
             },
         )
-        content_type = response.headers.get("content-type," "")
+        content_type = response.headers.get("content-type", "")
         if "html" not in content_type:
             return None
         

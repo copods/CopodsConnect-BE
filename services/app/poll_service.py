@@ -36,7 +36,7 @@ async def _get_post_and_poll(post_id: str):
 async def _serialized_poll_post(post_id: str, current_user_id: str) -> dict:
     post = await db.post.find_unique(where={"id": post_id}, include=post_service.POST_INCLUDE)
     user_vote_option_id = await post_service._single_user_poll_vote(post.poll.id, current_user_id)
-    return post_service._serialize_post(
+    return await post_service._serialize_post(
         post, current_user_id, include_comments=False, user_vote_option_id=user_vote_option_id
     )
 

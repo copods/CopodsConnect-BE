@@ -295,17 +295,25 @@ async def _serialize_post(
 
 # ── CRUD: Posts ───────────────────────────────────────────────
 
-async def create_post(current_user, body) -> dict:
+async def create_post(current_user, body, background_tasks) -> dict:
     if body.type == PostType.APPRECIATION:
         if not body.appreciationTypeId or not body.recipientIds:
             raise AppException(400, "appreciationTypeId and recipientIds are required for appreciation posts")
-        
-        #Add validations to ensure that the recipients are valid adn exist in the DB.
-        
         await _validate_recipients(body.recipientIds, current_user.id)
-
-        # Silently deduplicate: remove recipients from normal tags
         body.taggedUserIds = [uid for uid in body.taggedUserIds if uid not in body.recipientIds]
+
+        # ── FAST PATH: Default Appreciation Message ──
+        # The frontend explicitly flags this. Caption is system-generated and safe.
+        # Skip moderation entirely and publish immediately.
+        if body.isDefaultMessage:
+            import re
+            app_type = await db.appreciationtype.find_unique(where={"id": body.appreciationTypeId})
+            if app_type and app_type.description:
+                tokens = re.findall(r'@\[[^\]]+\]', body.caption or "")
+                mention_prefix = " , ".join(tokens)
+                body.caption = (mention_prefix + "\n\n" + app_type.description) if mention_prefix else app_type.description
+            return await _instant_publish_appreciation(current_user, body)
+
 
     if body.type == PostType.POLL:
         if body.taggedUserIds:
@@ -315,9 +323,7 @@ async def create_post(current_user, body) -> dict:
         if not body.caption or not body.caption.strip():
             raise AppException(400, "Poll question (caption) is required")
         if not (POLL_MIN_OPTIONS <= len(body.pollOptions) <= POLL_MAX_OPTIONS):
-            raise AppException(
-                400, f"Poll must have between {POLL_MIN_OPTIONS} and {POLL_MAX_OPTIONS} options"
-            )
+            raise AppException(400, f"Poll must have between {POLL_MIN_OPTIONS} and {POLL_MAX_OPTIONS} options")
         cleaned_options = [o.strip() for o in body.pollOptions]
         if any(not o for o in cleaned_options):
             raise AppException(400, "Poll options cannot be empty")
@@ -351,7 +357,9 @@ async def create_post(current_user, body) -> dict:
         }
 
     post = await db.post.create(data=create_data, include=FEED_INCLUDE)
-
+     # Re-fetch to ensure nested tag→user relations are populated
+    # (Prisma Python doesn't always hydrate deeply-nested includes in create responses)
+    post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
     await write_audit_log(
         event_type=AuditEventType.POST_CREATED,
         actor_type=AuditActorType.USER,
@@ -364,214 +372,262 @@ async def create_post(current_user, body) -> dict:
         },
     )
 
-    now = datetime.now(timezone.utc)
-
-    # ── Step 0 — Fetch link titles concurrently with image scan ───────────────
-    # We fetch link titles BEFORE running text moderation so that the titles
-    # can be appended to moderation_text and sent to Gemini. This closes the
-    # loophole where a user could paste a link whose page title contains NSFW
-    # content that would otherwise bypass text moderation entirely.
-    #
-    # fetch_link_metadata fires all URL fetches concurrently internally, so
-    # 1 link or 5 links takes the same time (= slowest single response, ~1s).
-    # We run it alongside scan_images (which is independent) to save time.
-    #
-    # Future scope (TODO): at post creation time, persist the fetched metadata
-    # to a PostLink DB table so that get_feed / get_post can do a DB join
-    # instead of a live HTTP fetch on every read.
-    image_urls = [m.url for m in body.media] if body.media else []
-
-    link_metadata, (image_score, image_reason) = await asyncio.gather(
-        fetch_link_metadata(body.caption or ""),
-        scan_images(image_urls) if image_urls else _noop_image_scan(),
+    # ── Queue moderation to run AFTER the response is sent ──
+    background_tasks.add_task(
+        _moderate_post_background,
+        post_id=post.id,
+        author_id=current_user.id,
+        body=body,
     )
 
-    # ── Step A — Build full moderation text (caption + link titles + poll options)
-    moderation_text = body.caption or ""
-    if body.type == PostType.POLL and body.pollOptions:
-        moderation_text = (moderation_text + " " + " | ".join(body.pollOptions)).strip()
+    return await _serialize_post(post, current_user.id, include_comments=False, link_metadata=None)
 
-    # Append fetched link titles so Gemini moderates them too.
-    # Format: "caption text | [link] Title 1 | [link] Title 2"
-    if link_metadata:
-        titles_combined = " | ".join(
-            f"[link] {m['title']}" for m in link_metadata if m.get("title")
-        )
-        if titles_combined:
-            moderation_text = (moderation_text + " " + titles_combined).strip()
+async def _instant_publish_appreciation(current_user, body) -> dict:
+    """Fast-path for default appreciations with no images."""
+    create_data: dict = {
+        "caption": body.caption,
+        "type":    body.type,
+        "status":  ContentStatus.PUBLISHED,
+        "author":  {"connect": {"id": current_user.id}},
+    }
+    if body.taggedUserIds:
+        create_data["tags"] = {"create": [{"taggedUserId": uid} for uid in body.taggedUserIds]}
+        
+    if body.media:
+        create_data["media"] = {
+            "create": [
+                {"url": m.url, "order": m.order, "altText": m.altText}
+                for m in body.media
+            ],
+        }
 
-    # ── Step B — Static + custom blacklist (no AI call) ───────────────────────
-    if moderation_text:
-        blacklist_hit = await check_blacklist(moderation_text)
-        if blacklist_hit:
-            await db.post.update(
-                where={"id": post.id},
-                data={"status": ContentStatus.REMOVED, "flagReason": FlagReason.NSFW_TEXT},
-            )
-            await auto_resolve_alert(
-                post_id=post.id,
-                author_id=current_user.id,
-                flagged_phrase=blacklist_hit,
-                extra_flag_details=_build_poll_flag_details(body) if body.type == PostType.POLL else None,
-            )
-            post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
-            return await _serialize_post(post, current_user.id, include_comments=False, link_metadata=link_metadata)
+    post = await db.post.create(data=create_data, include=FEED_INCLUDE)
+       # Re-fetch to ensure nested tag→user relations are populated
+    # (Prisma Python doesn't always hydrate deeply-nested includes in create responses)
+    post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
+    await write_audit_log(
+        event_type=AuditEventType.POST_CREATED, actor_type=AuditActorType.USER,
+        actor_id=current_user.id, entity_type=AuditEntityType.POST, entity_id=post.id,
+        metadata={"caption": body.caption[:80], "postType": str(post.type)},
+    )
+    
+    await _materialize_appreciation(
+        post_id=post.id, sender_id=current_user.id,
+        appreciation_type_id=body.appreciationTypeId,
+        recipient_ids=body.recipientIds
+    )
+    
+    await _write_published_audit(post, current_user.id, text_score=0.0, image_score=0.0)
+    
+    return await _serialize_post(post, current_user.id, include_comments=False, link_metadata=None)
 
-
-    # ── Step C — AI scan ──────────────────────────────────────────────────────
+async def _moderate_post_background(post_id: str, author_id: str, body) -> None:
+    """
+    Runs AFTER the API response is already sent to the client.
+    Fetches link metadata, scans text + images, then publishes or flags the post.
+    """
     try:
-        (text_score, text_category, text_phrase, text_confidence), = await asyncio.gather(
-            scan_text(moderation_text) if moderation_text else _noop_text_scan(),
+        now = datetime.now(timezone.utc)
+        image_urls = [m.url for m in body.media] if body.media else []
+
+        link_metadata, (image_score, image_reason) = await asyncio.gather(
+            fetch_link_metadata(body.caption or ""),
+            scan_images(image_urls) if image_urls else _noop_image_scan(),
         )
+
+        moderation_text = body.caption or ""
+        if body.type == PostType.POLL and body.pollOptions:
+            moderation_text = (moderation_text + " " + " | ".join(body.pollOptions)).strip()
+
+        if link_metadata:
+            titles_combined = " | ".join(
+                f"[link] {m['title']}" for m in link_metadata if m.get("title")
+            )
+            if titles_combined:
+                moderation_text = (moderation_text + " " + titles_combined).strip()
+
+        # ── Static blacklist ──────────────────────────────────
+        if moderation_text:
+            blacklist_hit = await check_blacklist(moderation_text)
+            if blacklist_hit:
+                await db.post.update(
+                    where={"id": post_id},
+                    data={"status": ContentStatus.REMOVED, "flagReason": FlagReason.NSFW_TEXT},
+                )
+                await auto_resolve_alert(
+                    post_id=post_id,
+                    author_id=author_id,
+                    flagged_phrase=blacklist_hit,
+                    extra_flag_details=_build_poll_flag_details(body) if body.type == PostType.POLL else None,
+                )
+                return
+
+        # ── AI scan ───────────────────────────────────────────
+        try:
+            (text_score, text_category, text_phrase, text_confidence), = await asyncio.gather(
+                scan_text(moderation_text) if moderation_text else _noop_text_scan(),
+            )
+        except Exception as e:
+            print(f"[moderation] AI scan failed for post {post_id}: {e}")
+            return  # stays PENDING_SCAN — recovery job will handle it
+
+        # ── Text flagged ──────────────────────────────────────
+        if text_score >= MODERATION_REVIEW_THRESHOLD:
+            whitelist_decision = await check_whitelist(text_phrase, text_confidence)
+
+            if whitelist_decision == "auto_publish":
+                post = await db.post.update(
+                    where={"id": post_id},
+                    data={"status": ContentStatus.PUBLISHED},
+                    include=FEED_INCLUDE,
+                )
+                if body.type == PostType.APPRECIATION:
+                    await _materialize_appreciation(
+                        post_id=post_id, sender_id=author_id,
+                        appreciation_type_id=body.appreciationTypeId,
+                        recipient_ids=body.recipientIds
+                    )
+                elif body.type == PostType.POLL:
+                    await _materialize_poll(
+                        post_id=post_id, creator_id=author_id,
+                        option_texts=body.pollOptions, closes_at=body.pollClosesAt,
+                    )
+                await _write_published_audit(post, author_id, text_score, image_score)
+                return
+
+            note = (
+                f"Whitelisted term ('{text_phrase}') — AI flagged anyway "
+                f"(confidence: {text_confidence:.2f})"
+                if whitelist_decision == "queue_with_note" else None
+            )
+            await db.post.update(
+                where={"id": post_id},
+                data={"status": ContentStatus.FLAGGED, "flagReason": FlagReason.NSFW_TEXT, "flaggedAt": now},
+            )
+            await create_alert(
+                post_id=post_id, author_id=author_id,
+                flag_details={
+                    "text_score": text_score, "image_score": image_score,
+                    "reason": FlagReason.NSFW_TEXT.value,
+                    "appreciationTypeId": body.appreciationTypeId if body.type == PostType.APPRECIATION else None,
+                    "recipientIds": body.recipientIds if body.type == PostType.APPRECIATION else None,
+                    **(_build_poll_flag_details(body) if body.type == PostType.POLL else {}),
+                    "category": text_category, "confidence": text_confidence,
+                },
+                flagged_phrase=text_phrase, note=note,
+            )
+            await write_audit_log(
+                event_type=AuditEventType.POST_SCAN_COMPLETED, actor_type=AuditActorType.SYSTEM,
+                entity_type=AuditEntityType.POST, entity_id=post_id,
+                metadata={"finalStatus": "FLAGGED", "postAuthorId": author_id,
+                          "textScore": text_score, "imageScore": image_score,
+                          "flagReason": FlagReason.NSFW_TEXT.value},
+            )
+            return
+
+        # ── Image flagged ─────────────────────────────────────
+        if image_score >= MODERATION_REVIEW_THRESHOLD:
+            await db.post.update(
+                where={"id": post_id},
+                data={"status": ContentStatus.FLAGGED, "flagReason": FlagReason.NSFW_IMAGE, "flaggedAt": now},
+            )
+            await create_alert(
+                post_id=post_id, author_id=author_id,
+                flag_details={
+                    "text_score": text_score, "image_score": image_score,
+                    "reason": FlagReason.NSFW_IMAGE.value,
+                    "appreciationTypeId": body.appreciationTypeId if body.type == PostType.APPRECIATION else None,
+                    "recipientIds": body.recipientIds if body.type == PostType.APPRECIATION else None,
+                    **(_build_poll_flag_details(body) if body.type == PostType.POLL else {}),
+                },
+                flagged_phrase=None,
+            )
+            await write_audit_log(
+                event_type=AuditEventType.POST_SCAN_COMPLETED, actor_type=AuditActorType.SYSTEM,
+                entity_type=AuditEntityType.POST, entity_id=post_id,
+                metadata={"finalStatus": "FLAGGED", "postAuthorId": author_id,
+                          "textScore": text_score, "imageScore": image_score,
+                          "flagReason": FlagReason.NSFW_IMAGE.value},
+            )
+            return
+
+        # ── All clean — publish ───────────────────────────────
+        post = await db.post.update(
+            where={"id": post_id},
+            data={"status": ContentStatus.PUBLISHED},
+            include=FEED_INCLUDE,
+        )
+        if body.type == PostType.APPRECIATION:
+            await _materialize_appreciation(
+                post_id=post_id, sender_id=author_id,
+                appreciation_type_id=body.appreciationTypeId,
+                recipient_ids=body.recipientIds
+            )
+        elif body.type == PostType.POLL:
+            await _materialize_poll(
+                post_id=post_id, creator_id=author_id,
+                option_texts=body.pollOptions, closes_at=body.pollClosesAt,
+            )
+        await _write_published_audit(post, author_id, text_score, image_score)
 
     except Exception as e:
-        print(f"[moderation] AI scan failed for post {post.id}: {e}")
-        await db.post.delete(where={"id": post.id})
-        raise AppException(503, "Post could not be processed. Please try again.")
+        print(f"[moderation] Unhandled error in background task for post {post_id}: {e}")
 
-    # ── Text flagged ───────────────────────────────────────────
-    if text_score >= MODERATION_REVIEW_THRESHOLD:
-        whitelist_decision = await check_whitelist(text_phrase, text_confidence)
+async def recover_stuck_pending_posts(background_tasks) -> None:
+    """Finds posts stuck in PENDING_SCAN for > 2 minutes and re-queues moderation."""
+    from datetime import timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
 
-        if whitelist_decision == "auto_publish":
-            post = await db.post.update(
-                where={"id": post.id},
-                data={"status": ContentStatus.PUBLISHED},
-                include=FEED_INCLUDE,
-            )
-
-            if body.type == PostType.APPRECIATION:
-                await _materialize_appreciation(
-                    post_id=post.id,
-                    sender_id=current_user.id,
-                    appreciation_type_id=body.appreciationTypeId,
-                    recipient_ids=body.recipientIds
-                )
-            elif body.type == PostType.POLL:
-                await _materialize_poll(
-                    post_id=post.id,
-                    creator_id=current_user.id,
-                    option_texts=body.pollOptions,
-                    closes_at=body.pollClosesAt,
-                )
-
-            await _write_published_audit(post, current_user.id, text_score, image_score)
-
-            post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
-            return await _serialize_post(post, current_user.id, include_comments=False,link_metadata=link_metadata)
-
-        note = (
-            f"Whitelisted term ('{text_phrase}') — AI flagged anyway "
-            f"(confidence: {text_confidence:.2f})"
-            if whitelist_decision == "queue_with_note" else None
-        )
-
-        await db.post.update(
-            where={"id": post.id},
-            data={
-                "status":    ContentStatus.FLAGGED,
-                "flagReason": FlagReason.NSFW_TEXT,
-                "flaggedAt": now,
-            },
-        )
-        await create_alert(
-            post_id=post.id,
-            author_id=current_user.id,
-            flag_details={
-                "text_score":  text_score,
-                "image_score": image_score,
-                "reason":      FlagReason.NSFW_TEXT.value,
-                "appreciationTypeId": body.appreciationTypeId if body.type == PostType.APPRECIATION else None,
-                "recipientIds": body.recipientIds if body.type == PostType.APPRECIATION else None,
-                **(_build_poll_flag_details(body) if body.type == PostType.POLL else {}),
-                "category":    text_category,
-                "confidence":  text_confidence,
-            },
-            flagged_phrase=text_phrase,
-            note=note,
-        )
-        await write_audit_log(
-            event_type=AuditEventType.POST_SCAN_COMPLETED,
-            actor_type=AuditActorType.SYSTEM,
-            entity_type=AuditEntityType.POST,
-            entity_id=post.id,
-            metadata={
-                "finalStatus":  "FLAGGED",
-                "postAuthorId": current_user.id,
-                "textScore":    text_score,
-                "imageScore":   image_score,
-                "flagReason":   FlagReason.NSFW_TEXT.value,
-            },
-        )
-        post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
-        return await _serialize_post(post, current_user.id, include_comments=False, link_metadata=link_metadata)
-
-    # ── Image flagged ──────────────────────────────────────────
-    if image_score >= MODERATION_REVIEW_THRESHOLD:
-        await db.post.update(
-            where={"id": post.id},
-            data={
-                "status":    ContentStatus.FLAGGED,
-                "flagReason": FlagReason.NSFW_IMAGE,
-                "flaggedAt": now,
-            },
-        )
-        await create_alert(
-            post_id=post.id,
-            author_id=current_user.id,
-            flag_details={
-                "text_score":  text_score,
-                "image_score": image_score,
-                "reason":      FlagReason.NSFW_IMAGE.value,
-                "appreciationTypeId": body.appreciationTypeId if body.type == PostType.APPRECIATION else None,
-                "recipientIds": body.recipientIds if body.type == PostType.APPRECIATION else None,
-                **(_build_poll_flag_details(body) if body.type == PostType.POLL else {}),
-            },
-            flagged_phrase=None,
-        )
-        await write_audit_log(
-            event_type=AuditEventType.POST_SCAN_COMPLETED,
-            actor_type=AuditActorType.SYSTEM,
-            entity_type=AuditEntityType.POST,
-            entity_id=post.id,
-            metadata={
-                "finalStatus":  "FLAGGED",
-                "postAuthorId": current_user.id,
-                "textScore":    text_score,
-                "imageScore":   image_score,
-                "flagReason":   FlagReason.NSFW_IMAGE.value,
-            },
-        )
-        post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
-        return await _serialize_post(post, current_user.id, include_comments=False,link_metadata=link_metadata)
-
-    # ── All clean — publish ────────────────────────────────────
-    post = await db.post.update(
-        where={"id": post.id},
-        data={"status": ContentStatus.PUBLISHED},
+    stuck_posts = await db.post.find_many(
+        where={
+            "status": ContentStatus.PENDING_SCAN,
+            "createdAt": {"lt": cutoff},
+        },
         include=FEED_INCLUDE,
+        take=50,
     )
 
-    if body.type == PostType.APPRECIATION:
-        await _materialize_appreciation(
-            post_id=post.id,
-            sender_id=current_user.id,
-            appreciation_type_id=body.appreciationTypeId,
-            recipient_ids=body.recipientIds
+    for post in stuck_posts:
+        print(f"[recovery] Re-queuing moderation for stuck post {post.id}")
+        background_tasks.add_task(_recover_single_post, post_id=post.id, author_id=post.authorId)
+
+
+async def _recover_single_post(post_id: str, author_id: str) -> None:
+    """Recovery: re-runs full moderation instead of blindly publishing."""
+    try:
+        post = await db.post.find_unique(
+            where={"id": post_id},
+            include={
+                "media": True,
+                "appreciation": {"include": {"recipients": True}},
+                "poll": {"include": {"options": {"order_by": {"order": "asc"}}}},
+            },
         )
-    elif body.type == PostType.POLL:
-        await _materialize_poll(
-            post_id=post.id,
-            creator_id=current_user.id,
-            option_texts=body.pollOptions,
-            closes_at=body.pollClosesAt,
-        )
+        if not post or post.status != ContentStatus.PENDING_SCAN:
+            return
 
-    await _write_published_audit(post, current_user.id, text_score, image_score)
+        # Reconstruct a minimal body from the DB so _moderate_post_background can re-run.
+        class _RecoveryBody:
+            def __init__(self, p):
+                self.caption = p.caption
+                self.type = p.type
+                self.taggedUserIds = []
+                self.media = [
+                    type('M', (), {'url': m.url, 'order': m.order, 'altText': m.altText})()
+                    for m in (getattr(p, 'media', None) or [])
+                ]
+                app = getattr(p, 'appreciation', None)
+                self.appreciationTypeId = app.appreciationTypeId if app else None
+                self.recipientIds = [r.userId for r in app.recipients] if app else []
+                poll = getattr(p, 'poll', None)
+                self.pollOptions = [o.text for o in (poll.options if poll else [])]
+                self.pollClosesAt = poll.closesAt if poll else None
 
-    post = await db.post.find_unique(where={"id": post.id}, include=FEED_INCLUDE)
-    return await _serialize_post(post, current_user.id, include_comments=False,link_metadata=link_metadata)
+        print(f"[recovery] Re-running moderation for stuck post {post_id}")
+        await _moderate_post_background(post_id=post_id, author_id=author_id, body=_RecoveryBody(post))
 
+    except Exception as e:
+        print(f"[recovery] Failed to recover post {post_id}: {e}")
 
 
 async def _noop_text_scan():
@@ -693,7 +749,10 @@ async def get_feed(
 
     where: dict = {
         "deletedAt": None,
-        "status": ContentStatus.PUBLISHED,
+        "OR": [
+            {"status": ContentStatus.PUBLISHED},
+            {"status": ContentStatus.PENDING_SCAN, "authorId": current_user.id},
+        ],
     }
 
     if post_type:
@@ -786,7 +845,10 @@ async def get_post(current_user, post_id: str) -> dict:
 async def update_post(current_user, post_id: str, body) -> dict:
     post = await db.post.find_unique(
         where={"id": post_id},
-        include={"poll": {"include": {"options": {"order_by": {"order": "asc"}}}}},
+        include={
+            "poll": {"include": {"options": {"order_by": {"order": "asc"}}}},
+            "tags": True
+        },
     )
     if not post or post.deletedAt is not None:
         raise AppException(404, "Post not found")
@@ -795,20 +857,106 @@ async def update_post(current_user, post_id: str, body) -> dict:
     if post.authorId != current_user.id:
         raise AppException(403, "You can only edit your own posts")
 
-    # --- NEW: Delegate to poll update logic ---
     if post.type == PostType.POLL:
         return await _update_poll_post(current_user, post, body)
     # ------------------------------------------
 
-    updated = await db.post.update(
-        where={"id": post_id},
-        data={
-            "caption": body.caption,
-            "captionEditedAt": datetime.now(timezone.utc),
-        },
-        include=POST_INCLUDE,
-    )
+    update_data: dict = {}
+    if body.caption is not None:
+        update_data["caption"] = body.caption
+        update_data["captionEditedAt"] = datetime.now(timezone.utc)
+
+    if update_data:
+        updated = await db.post.update(
+            where={"id": post_id},
+            data=update_data,
+            include=POST_INCLUDE,
+        )
+    else:
+        updated = await db.post.find_unique(where={"id": post_id}, include=POST_INCLUDE)
+
+    # ── Tagged users: diff-based add / remove ─────────────────────────
+    if body.taggedUserIds is not None:
+        await _update_post_tags(current_user, post_id, body.taggedUserIds, post.type)
+        # Re-fetch so the serialized response reflects the updated tag list
+        updated = await db.post.find_unique(where={"id": post_id}, include=POST_INCLUDE)
+    # ------------------------------------------------------------------
+
     return await _serialize_post(updated, current_user.id, include_comments=True)
+
+
+async def _update_post_tags(current_user, post_id: str, incoming_user_ids: list[str], post_type) -> None:
+    """
+    Diff-based tagged-user update for a post (USER_POST or APPRECIATION).
+
+    - incoming_user_ids = full replacement list; [] clears all tags.
+    - POLL posts: rejected — tagging is not supported on polls.
+    - APPRECIATION posts: any ID already in the appreciation's recipient list
+      is silently dropped (recipients != tags, no duplication).
+    - Validates every incoming ID is a real, active user.
+    - Fires USER_TAGGED_IN_POST / USER_UNTAGGED_FROM_POST audit events.
+    """
+    if post_type == PostType.POLL:
+        raise AppException(400, "Polls do not support tagging users")
+
+    # ── Deduplicate against appreciation recipients ────────────────────
+    if post_type == PostType.APPRECIATION:
+        appreciation = await db.appreciation.find_first(
+            where={"postId": post_id, "deletedAt": None},
+            include={"recipients": True},
+        )
+        if appreciation and appreciation.recipients:
+            recipient_user_ids = {r.userId for r in appreciation.recipients}
+            incoming_user_ids = [uid for uid in incoming_user_ids if uid not in recipient_user_ids]
+
+    # ── Deduplicate the incoming list itself (preserve order) ─────────
+    incoming_user_ids = list(dict.fromkeys(incoming_user_ids))
+
+    # ── Validate that all incoming IDs are real, active users ─────────
+    if incoming_user_ids:
+        found_users = await db.user.find_many(
+            where={"id": {"in": incoming_user_ids}, "deletedAt": None}
+        )
+        if len(found_users) != len(incoming_user_ids):
+            raise AppException(400, "One or more tagged users not found")
+
+    # ── Diff against current DB state ─────────────────────────────────
+    existing_tags = await db.posttag.find_many(where={"postId": post_id})
+    existing_user_ids = {t.taggedUserId for t in existing_tags}
+    incoming_set = set(incoming_user_ids)
+
+    ids_to_add = [uid for uid in incoming_user_ids if uid not in existing_user_ids]
+    ids_to_remove = list(existing_user_ids - incoming_set)
+
+    # ── Apply DB changes ───────────────────────────────────────────────
+    if ids_to_remove:
+        await db.posttag.delete_many(
+            where={"postId": post_id, "taggedUserId": {"in": ids_to_remove}}
+        )
+
+    for uid in ids_to_add:
+        await db.posttag.create(data={"postId": post_id, "taggedUserId": uid})
+
+    # ── Audit log ─────────────────────────────────────────────────────
+    for uid in ids_to_add:
+        await write_audit_log(
+            event_type=AuditEventType.USER_TAGGED_IN_POST,
+            actor_type=AuditActorType.USER,
+            actor_id=current_user.id,
+            entity_type=AuditEntityType.POST,
+            entity_id=post_id,
+            metadata={"taggedUserId": uid},
+        )
+
+    for uid in ids_to_remove:
+        await write_audit_log(
+            event_type=AuditEventType.USER_UNTAGGED_FROM_POST,
+            actor_type=AuditActorType.USER,
+            actor_id=current_user.id,
+            entity_type=AuditEntityType.POST,
+            entity_id=post_id,
+            metadata={"taggedUserId": uid},
+        )
 
 
 async def _update_poll_post(current_user, post, body) -> dict:

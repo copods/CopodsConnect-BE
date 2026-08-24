@@ -15,6 +15,8 @@ class CreatePostRequest(BaseModel):
     recipientIds: list[str] = [] 
     pollOptions: list[str]=[]         # NEW — required for type=POLL, 2-5 entries
     pollClosesAt: Optional[datetime] = None  # NEW — optional deadline, must be in the future
+    isDefaultMessage: bool = False
+
 
 
 class MediaItem(BaseModel):
@@ -37,6 +39,8 @@ class UpdatePostRequest(BaseModel):
     pollOptions:Optional[list[str]] = None # NEW — only for editing a poll's option text;
                                                    # must match the existing option count exactly,
                                                    # adding/removing options is not supported
+    taggedUserIds: Optional[list[str]] = None  # NEW — full replacement list;
+                                               # None = no change, [] = remove all tags
 
 
 class CreateCommentRequest(BaseModel):
