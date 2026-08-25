@@ -22,6 +22,14 @@ class ResolveAlertRequest(BaseModel):
 
 # ── Nested response shapes (OUT) ─────────────────────────────
 
+class AlertTaggedUserOut(BaseModel):
+    id: str
+    name: Optional[str]
+
+class AlertTagOut(BaseModel):
+    taggedUserId: str
+    taggedUser: Optional[AlertTaggedUserOut]
+
 class AlertPostMediaOut(BaseModel):
     url: str
     order: int
@@ -37,6 +45,7 @@ class AlertPostOut(BaseModel):
     flaggedAt: Optional[datetime]
     createdAt: datetime
     media: list[AlertPostMediaOut]
+    tags: Optional[list[AlertTagOut]] = None
 
     model_config = {"from_attributes": True}
 
@@ -62,6 +71,7 @@ class AlertCommentOut(BaseModel):
     id: str
     body: str
     createdAt: datetime
+    tags: Optional[list[AlertTagOut]] = None
     model_config = {"from_attributes": True}
 
 # ── Main alert response DTO (OUT) ─────────────────────────────

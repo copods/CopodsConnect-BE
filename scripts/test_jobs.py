@@ -13,7 +13,7 @@ from db.client import db
 from jobs.unban_job import clear_expired_bans
 from jobs.purge_soft_deleted_job import purge_soft_deleted_users
 from jobs.daily_celebration_job import create_daily_celebration_posts
-from jobs.leaderboard_digest_job import send_leaderboard_digest
+from jobs.leaderboard_digest_job import send_most_appreciated_monthly
 
 async def test_all_jobs():
     print("Connecting to database...")
@@ -32,9 +32,9 @@ async def test_all_jobs():
         await create_daily_celebration_posts()
         print("✅ Finished create_daily_celebration_posts")
         
-        print("\n--- 4. Testing send_leaderboard_digest ---")
-        await send_leaderboard_digest()
-        print("✅ Finished send_leaderboard_digest")
+        print("\n--- 4. Testing send_most_appreciated_monthly ---")
+        await send_most_appreciated_monthly()
+        print("✅ Finished send_most_appreciated_monthly")
         
     except Exception as e:
         print(f"❌ Error while running jobs: {e}")
