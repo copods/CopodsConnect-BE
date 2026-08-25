@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from jobs.unban_job import clear_expired_bans
 from jobs.purge_soft_deleted_job import purge_soft_deleted_users
 from jobs.daily_celebration_job import create_daily_celebration_posts
-from jobs.leaderboard_digest_job import send_leaderboard_digest
+from jobs.leaderboard_digest_job import send_most_appreciated_monthly
 from services.app.post_service import recover_stuck_pending_posts
 from constants import APP_NAME, API_PREFIX
 from routes import auth
@@ -87,13 +87,13 @@ async def lifespan(app: FastAPI):
         id="daily_celebrations",
     )
     scheduler.add_job(
-        make_logged_job(send_leaderboard_digest, "leaderboard_digest"),
+        make_logged_job(send_most_appreciated_monthly, "most_appreciated_monthly"),
         "cron",
-        day_of_week="mon",
+        day=1,          # 1st of every month
         hour=9,
         minute=0,
         timezone=ZoneInfo("Asia/Kolkata"),
-        id="leaderboard_digest",
+        id="most_appreciated_monthly",
     )
     scheduler.add_job(
         make_logged_job(_recover_pending_cron, "recover_pending_posts"),

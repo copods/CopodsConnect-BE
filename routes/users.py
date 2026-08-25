@@ -57,7 +57,6 @@ async def get_all_users(
 ):
     result = await user_service.get_all_users(
         search, status, status_surface, role, page, page_size,
-        exclude_id=current_user.id,
     )
     return api_response(200, result, "Users fetched successfully")
 

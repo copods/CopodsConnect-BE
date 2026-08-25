@@ -12,6 +12,7 @@ from botocore.exceptions import ClientError
 # Admin panel base URL — set ADMIN_PANEL_URL in your environment.
 # ---------------------------------------------------------------------------
 ADMIN_PANEL_URL = os.getenv("ADMIN_PANEL_URL", "https://app.copods.co")
+APP_DOWNLOAD_URL = os.getenv("APP_DOWNLOAD_URL", "https://copods.co/download")
 
 # ---------------------------------------------------------------------------
 # Logo — read from public/assets/logo.svg and inlined into HTML emails.
@@ -217,14 +218,15 @@ async def send_invitation_email(to_email: str) -> bool:
     """Sends app invitation email to a new user (MEMBER)."""
     subject = "You're invited to join CopodsConnect"
 
-    body_text = """\
+    body_text = f"""\
 Hi there,
 
 You have been invited to join CopodsConnect — your team's recognition and culture platform.
 
 Sign in with your Google account to get started and become part of your team's community.
 
-Your login link will be shared with you shortly. Stay tuned!
+Download the app here:
+{APP_DOWNLOAD_URL}
 
 Welcome aboard,
 The CopodsConnect Team
@@ -244,11 +246,12 @@ The CopodsConnect Team
                 "team's community."
             )
             + _spacer(4)
-            + _p("<em>Your login link will be shared with you shortly. Stay tuned!</em>")
-            + _spacer(16)
+            + _p("<em>Click the button below to download the app and sign in.</em>")
+            + _spacer(8)
             + _p("Welcome aboard,<br/><strong>The CopodsConnect Team</strong>")
         ),
-        # No button yet — login link will be wired up later
+        button_label="Download the App",
+        button_url=APP_DOWNLOAD_URL,
     )
 
     return await asyncio.to_thread(_send_email_via_ses, to_email, subject, body_text, body_html)

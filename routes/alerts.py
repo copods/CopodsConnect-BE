@@ -20,6 +20,8 @@ from models.schemas.alerts import (
     AlertPostMediaOut,
     AlertUserOut,
     AlertResolvedByOut,
+    AlertTagOut,
+    AlertTaggedUserOut,
 )
 
 alerts_router = APIRouter(
@@ -59,11 +61,23 @@ async def _serialize_alert(alert) -> dict:
             flaggedAt=post.flaggedAt,
             createdAt=post.createdAt,
             media=[AlertPostMediaOut(url=m.url, order=m.order) for m in (getattr(post, "media", []) or [])],
+            tags=[
+                AlertTagOut(
+                    taggedUserId=t.taggedUserId,
+                    taggedUser=AlertTaggedUserOut(id=t.taggedUser.id, name=t.taggedUser.name) if getattr(t, "taggedUser", None) else None
+                ) for t in (getattr(post, "tags", []) or [])
+            ],
         ) if post else None,
         comment=AlertCommentOut(
             id=comment.id,
             body=comment.body,
             createdAt=comment.createdAt,
+            tags=[
+                AlertTagOut(
+                    taggedUserId=t.taggedUserId,
+                    taggedUser=AlertTaggedUserOut(id=t.taggedUser.id, name=t.taggedUser.name) if getattr(t, "taggedUser", None) else None
+                ) for t in (getattr(comment, "tags", []) or [])
+            ],
         ) if comment else None,
         reportedUser=AlertUserOut(
             id=reported_user.id,
@@ -82,8 +96,25 @@ async def _serialize_alert(alert) -> dict:
 
 
 ALERT_INCLUDE = {
-    "post": {"include": {"media": {"order_by": {"order": "asc"}}}},
-    "comment": True,
+    "post": {
+        "include": {
+            "media": {"order_by": {"order": "asc"}},
+            "tags": {
+                "include": {
+                    "taggedUser": True
+                }
+            }
+        }
+    },
+    "comment": {
+        "include": {
+            "tags": {
+                "include": {
+                    "taggedUser": True
+                }
+            }
+        }
+    },
     "reportedUser": True,
     "resolvedBy": True,
 }

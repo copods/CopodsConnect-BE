@@ -3,6 +3,8 @@ from db.client import db
 from models.schemas.app.users import AppEditProfileTextRequest, AppEditProfilePictureRequest
 from services.user_service import serialize_user
 from utils.exceptions import AppException
+from services.moderation_service import scan_images
+from constants import MODERATION_REVIEW_THRESHOLD
 
 
 async def update_user_profile_text(user_id: str, data: AppEditProfileTextRequest):
@@ -20,6 +22,11 @@ async def update_user_profile_text(user_id: str, data: AppEditProfileTextRequest
 
 async def update_user_profile_picture(user_id: str, data: AppEditProfilePictureRequest):
     """Save the Supabase public URL as the user's profile picture."""
+    if data.picture:
+        image_score, _ = await scan_images([data.picture])
+        if image_score >= MODERATION_REVIEW_THRESHOLD:
+            raise AppException(400, "Profile picture contains inappropriate content according to community guidelines.")
+            
     updated_user = await db.user.update(
         where={"id": user_id},
         data={"picture": data.picture},
