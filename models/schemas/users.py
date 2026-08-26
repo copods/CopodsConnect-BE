@@ -26,6 +26,7 @@ class InviteAdminsRequest(BaseModel):
 class ResendInviteRequest(BaseModel):
     """IN — resend invite emails to existing users/admins. No new DB entry created."""
     emails: List[EmailStr]
+    inviteType: Optional[str] = None
 
 
 class PaginatedUsersResponse(BaseModel):
