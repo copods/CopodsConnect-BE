@@ -45,7 +45,7 @@ async def create_daily_celebration_posts() -> None:
             post = await db.post.create(
                 data={
                     "type": "SYSTEM_BIRTHDATE",
-                    "caption": f"🎉 Happy Birthday, @{name}! Wishing you a fantastic day ahead! 🎂",
+                    "caption": f"🎉 Happy Birthday, @[{user_id}]! Wishing you a fantastic day ahead! 🎂",
                     "status": "PUBLISHED",
                     "tags": {
                         "create": [{"taggedUserId": user_id}]
@@ -104,7 +104,7 @@ async def create_daily_celebration_posts() -> None:
                 data={
                     "type": "SYSTEM_ANNIVERSARY",
                     "caption": (
-                        f"🎊 Happy {years} Year Work Anniversary, @{name}! "
+                        f"🎊 Happy {years} Year Work Anniversary, @[{user_id}]! "
                         f"Thanks for being an amazing part of the journey! 🚀"
                     ),
                     "status": "PUBLISHED",

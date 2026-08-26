@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from db.client import db
 from prisma.enums import Role
 from utils.exceptions import AppException
-from utils.email import send_invitation_email, send_admin_invitation_email, send_promotion_email, send_demotion_email
+from utils.email import send_invitation_email, send_admin_invitation_email
 from constants import ALLOWED_EMAIL_DOMAIN, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from services.audit_service import write_audit_log
 from prisma.enums import AuditActorType, AuditEntityType, AuditEventType
@@ -368,11 +368,12 @@ async def bulk_invite_users(file_bytes: bytes, filename: str, role: Role = Role.
     }
 
 
-async def resend_invite(emails: list) -> dict:
+async def resend_invite(emails: list, invite_type: str | None = None) -> dict:
     """
     Resend invite emails to existing users/admins.
     No new DB entry created.
     Sends admin email template if role is ADMIN, user template otherwise.
+    If invite_type is specified, it overrides the default behavior.
     """
     sent = []
     skipped = []
@@ -390,10 +391,18 @@ async def resend_invite(emails: list) -> dict:
                 "Super admins are hardcoded in the system and cannot be re-invited.",
             )
 
-        if user.role == Role.ADMIN:
+        if invite_type == "app":
+            await send_invitation_email(email)
+        elif invite_type == "admin":
+            if user.role != Role.ADMIN:
+                skipped.append({"email": email, "reason": "User is not an admin"})
+                continue
             await send_admin_invitation_email(email)
         else:
-            await send_invitation_email(email)
+            if user.role == Role.ADMIN:
+                await send_admin_invitation_email(email)
+            else:
+                await send_invitation_email(email)
 
         await write_audit_log(
             event_type=AuditEventType.USER_INVITATION_RESENT,
@@ -698,11 +707,6 @@ async def change_role(current_user, target_user_id: str, new_role: str) -> dict:
         data={"role": Role[new_role]}
     )
 
-    if new_role == "ADMIN":
-        await send_promotion_email(updated_user.email)
-    elif new_role == "MEMBER":
-        await send_demotion_email(updated_user.email)
-
     await write_audit_log(
         event_type=AuditEventType.USER_ROLE_CHANGED,
         actor_type=AuditActorType.ADMIN,
@@ -714,6 +718,7 @@ async def change_role(current_user, target_user_id: str, new_role: str) -> dict:
 
     return {
         "userId": updated_user.id,
+        "email": updated_user.email,
         "role": str(updated_user.role)
     }
 

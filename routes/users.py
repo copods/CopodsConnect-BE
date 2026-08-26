@@ -6,7 +6,7 @@ from fastapi.encoders import jsonable_encoder
 from middlewares.auth import require_admin, require_super_admin, require_platform
 from services import user_service
 from utils.ApiResponse import api_response
-from utils.email import send_invitation_email, send_admin_invitation_email
+from utils.email import send_invitation_email, send_admin_invitation_email, send_promotion_email, send_demotion_email
 from prisma.enums import Role
 from constants import DEFAULT_PAGE_SIZE
 from models.schemas.users import (
@@ -114,7 +114,7 @@ async def resend_invite(
     body: ResendInviteRequest,
     current_user=Depends(require_admin)
 ):
-    result = await user_service.resend_invite(body.emails)
+    result = await user_service.resend_invite(body.emails, body.inviteType)
     return api_response(200, result, "Invitations resent successfully")
 
 
@@ -250,11 +250,16 @@ async def unban_user(
 
 @users_router.patch("/{user_id}/role")
 async def change_role(
+    background_tasks: BackgroundTasks,
     user_id: str,
     body: ChangeRoleRequest,
     current_user=Depends(require_super_admin)
 ):
     result = await user_service.change_role(current_user, user_id, body.role)
+    if body.role == "ADMIN":
+        background_tasks.add_task(send_promotion_email, result["email"])
+    elif body.role == "MEMBER":
+        background_tasks.add_task(send_demotion_email, result["email"])
     return api_response(200, result, "User role updated successfully")
 
 
