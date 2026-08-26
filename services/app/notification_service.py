@@ -138,11 +138,46 @@ async def get_notifications(
 
 
 async def get_unread_count(current_user, event_types: list | None = None) -> dict:
+    """
+    Returns the number of *visible, grouped* unread notifications — matching
+    exactly what the app shows in the notification drawer.
+
+    Raw DB row count is NOT used because aggregated event types (POST_LIKED,
+    COMMENT_CREATED, POLL_VOTE_CAST) collapse multiple rows into a single
+    grouped item. Counting raw rows would over-report the badge (e.g. 10 likes
+    on one post = 10 raw rows but only 1 grouped item shown).
+    """
     where: dict = {"recipientId": current_user.id, "readAt": None}
     if event_types:
         where["auditLog"] = {"eventType": {"in": event_types}}
-    count = await db.usernotification.count(where=where)
-    return UnreadCountResponse(count=count).model_dump(mode="json")
+
+    # Fetch all unread rows (capped at a reasonable limit to keep this fast)
+    unread_rows = await db.usernotification.find_many(
+        where=where,
+        take=500,
+        order={"createdAt": "desc"},
+        include={"auditLog": True},
+    )
+
+    # Apply the same grouping as get_notifications so the count matches the list
+    seen: set = set()
+    grouped_count = 0
+
+    for un in unread_rows:
+        al = un.auditLog
+        et = al.eventType
+
+        if et in AGGREGATED_EVENT_TYPES:
+            # Group key: (eventType, target entity, recipient) — same as list view
+            entity_key = al.parentEntityId or al.entityId
+            key = (et, entity_key, current_user.id)
+            if key in seen:
+                continue  # Already counted this group
+            seen.add(key)
+
+        grouped_count += 1
+
+    return UnreadCountResponse(count=grouped_count).model_dump(mode="json")
 
 
 async def mark_notification_read(current_user, notification_id: str) -> dict:

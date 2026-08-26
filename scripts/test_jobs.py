@@ -14,6 +14,19 @@ from jobs.unban_job import clear_expired_bans
 from jobs.purge_soft_deleted_job import purge_soft_deleted_users
 from jobs.daily_celebration_job import create_daily_celebration_posts
 from jobs.leaderboard_digest_job import send_most_appreciated_monthly
+from services.app.post_service import recover_stuck_pending_posts
+
+class MockBackgroundTasks:
+    def __init__(self):
+        self.tasks = []
+    def add_task(self, func, *args, **kwargs):
+        self.tasks.append((func, args, kwargs))
+    async def run_all(self):
+        for func, args, kwargs in self.tasks:
+            if asyncio.iscoroutinefunction(func):
+                await func(*args, **kwargs)
+            else:
+                func(*args, **kwargs)
 
 async def test_all_jobs():
     print("Connecting to database...")
@@ -35,6 +48,12 @@ async def test_all_jobs():
         print("\n--- 4. Testing send_most_appreciated_monthly ---")
         await send_most_appreciated_monthly()
         print("✅ Finished send_most_appreciated_monthly")
+        
+        print("\n--- 5. Testing recover_stuck_pending_posts ---")
+        bg_tasks = MockBackgroundTasks()
+        await recover_stuck_pending_posts(bg_tasks)
+        await bg_tasks.run_all()
+        print("✅ Finished recover_stuck_pending_posts")
         
     except Exception as e:
         print(f"❌ Error while running jobs: {e}")
