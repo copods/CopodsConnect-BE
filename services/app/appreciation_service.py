@@ -1,4 +1,13 @@
 # services/app/appreciation_service.py
+#
+# ── Future Scope ──────────────────────────────────────────────────────────
+# Appreciations can be aggregated per user to compute an "appreciation score".
+# Based on these counts, badges (e.g. "Top Collaborator", "Most Helpful") can
+# be automatically awarded to users — making appreciations a more reliable way
+# to discover and recognise standout contributors across the organisation.
+# This is planned as a future feature and is NOT yet implemented.
+# ──────────────────────────────────────────────────────────────────────────
+
 from datetime import datetime, timezone
 
 from db.client import db
